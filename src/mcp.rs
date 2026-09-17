@@ -41,6 +41,21 @@ fn check_root(root: &str) -> Result<PathBuf, McpError> {
     Ok(path)
 }
 
+fn exact_pattern(query: &str) -> Option<&str> {
+    let query = query.trim();
+    if let Some(literal) = query.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+        return (!literal.trim().is_empty() && !literal.contains('"')).then_some(literal);
+    }
+    let identifier = |part: &str| {
+        let mut chars = part.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    (query.contains("::") && query.split("::").all(identifier)).then_some(query)
+}
+
 fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
@@ -121,7 +136,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Hybrid workspace search: semantic discovery fused with BM25, ranked with file:line cites. Falls back to lexical when no vector store exists."
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and double-quoted literals use exact rg lookup unless fts anchors are supplied. Falls back to lexical when no vector store exists."
     )]
     async fn search(
         &self,
@@ -129,6 +144,19 @@ impl OneGrep {
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
+        if p.fts.as_ref().is_none_or(|anchors| anchors.is_empty()) {
+            if let Some(pattern) = exact_pattern(&p.query) {
+                return self
+                    .rg(Parameters(RgParams {
+                        root: p.root.clone(),
+                        pattern: pattern.to_owned(),
+                        regex: Some(false),
+                        case_insensitive: Some(false),
+                        limit: Some(limit),
+                    }))
+                    .await;
+            }
+        }
         let mut query = p.query.clone();
         if let Some(fts) = &p.fts {
             query.push(' ');
@@ -277,4 +305,95 @@ pub async fn serve_http(port: u16, token: &str) -> Result<(), crate::Error> {
     axum::serve(listener, app)
         .await
         .map_err(|e| crate::Error::InvalidInput(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_routing_requires_an_unambiguous_anchor() {
+        for query in [
+            "foo::Bar",
+            " foo::Bar ",
+            "\"x:Name\"",
+            "\"{Binding User.Name}\"",
+        ] {
+            assert!(exact_pattern(query).is_some(), "{query}");
+        }
+        for query in [
+            "where is authentication handled",
+            "find definition of foo::Bar",
+            "foo::Bar example",
+            "foo::",
+            "::Bar",
+            "foo:::Bar",
+            "https://example.com",
+            "\"\"",
+            "\"   \"",
+            "\"foo\" OR \"bar\"",
+            "Bar",
+        ] {
+            assert_eq!(exact_pattern(query), None, "{query}");
+        }
+    }
+
+    #[tokio::test]
+    async fn intent_and_mixed_queries_stay_on_lexical_search() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        for (query, fts) in [
+            ("where is authentication handled", None),
+            ("foo::Bar", Some(vec!["implementation".into()])),
+            ("find definition of foo::Bar", None),
+        ] {
+            let result = OneGrep::new()
+                .search(Parameters(SearchParams {
+                    root: workspace.path().to_string_lossy().into_owned(),
+                    query: query.into(),
+                    fts,
+                    fuse: Some(false),
+                    limit: None,
+                }))
+                .await;
+            assert!(
+                result
+                    .expect_err("lexical search needs an index")
+                    .message
+                    .contains("not indexed")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_search_routes_to_rg_without_an_index() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("view.txt"),
+            "foo::Bar\nx:Name=\"SaveButton\"\n{Binding User.Name}\n",
+        )
+        .expect("fixture");
+        for (query, expected) in [
+            ("foo::Bar", "view.txt:1:foo::Bar"),
+            ("\"x:Name\"", "view.txt:2:x:Name"),
+            ("\"{Binding User.Name}\"", "view.txt:3:{Binding User.Name}"),
+        ] {
+            let result = OneGrep::new()
+                .search(Parameters(SearchParams {
+                    root: workspace.path().to_string_lossy().into_owned(),
+                    query: query.into(),
+                    fts: None,
+                    fuse: Some(false),
+                    limit: None,
+                }))
+                .await
+                .expect("exact search needs no index");
+            let text = serde_json::to_value(result).expect("response");
+            assert!(
+                text["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(expected)
+            );
+        }
+    }
 }
