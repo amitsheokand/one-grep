@@ -11,7 +11,7 @@ use grep::{
 };
 use ignore::WalkBuilder;
 
-use crate::Error;
+use crate::{Error, engine};
 
 /// One matching line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,6 +46,102 @@ impl Default for Options {
             limit: 100,
         }
     }
+}
+
+/// Stopwords dropped when turning an NL query into live-grep terms.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
+    "i", "in", "into", "is", "it", "its", "of", "on", "or", "that", "the", "this", "to", "we",
+    "what", "when", "where", "which", "who", "why", "with", "you",
+];
+
+/// Note shown when `search` degrades to live rg because `.one-grep` is missing.
+#[must_use]
+pub fn unindexed_note(workspace: &Path) -> String {
+    let root = workspace.display();
+    format!(
+        "mode: rg-fallback (no index at {}). Indexing is available for better ranking: one-grep index {root} && one-grep embed {root}",
+        engine::index_dir(workspace).display()
+    )
+}
+
+/// Distinctive tokens from a natural-language query for live-grep fallback.
+#[must_use]
+pub fn fallback_terms(query: &str) -> Vec<String> {
+    let mut terms: Vec<String> = query
+        .split(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/')))
+        .filter(|t| t.len() >= 2 && !is_stopword(t))
+        .map(ToOwned::to_owned)
+        .collect();
+    terms.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+    terms.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
+    let specific: Vec<String> = terms
+        .iter()
+        .filter(|t| identifier_like(t))
+        .cloned()
+        .collect();
+    if !specific.is_empty() {
+        terms = specific;
+    }
+    terms.truncate(8);
+    terms
+}
+
+fn is_stopword(term: &str) -> bool {
+    STOPWORDS.iter().any(|w| term.eq_ignore_ascii_case(w))
+}
+
+fn identifier_like(term: &str) -> bool {
+    term.bytes()
+        .any(|c| matches!(c, b'-' | b'_' | b'/' | b'.') || c.is_ascii_uppercase())
+}
+
+fn regex_escape(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for c in term.chars() {
+        if matches!(
+            c,
+            '\\' | '.' | '+' | '*' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$'
+        ) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Live grep for an unindexed `search` query: distinctive tokens, case-insensitive.
+///
+/// # Errors
+///
+/// Returns [`Error`] when the workspace cannot be walked or the pattern is bad.
+pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Vec<Hit>, Error> {
+    let terms = fallback_terms(query);
+    let (pattern, regex) = if terms.is_empty() {
+        (query.trim().to_owned(), false)
+    } else {
+        (
+            terms
+                .iter()
+                .map(|t| regex_escape(t))
+                .collect::<Vec<_>>()
+                .join("|"),
+            true,
+        )
+    };
+    if pattern.is_empty() {
+        return Ok(Vec::new());
+    }
+    search(
+        workspace,
+        &pattern,
+        &Options {
+            regex,
+            case_insensitive: true,
+            globs: Vec::new(),
+            limit,
+        },
+    )
 }
 
 /// Search `workspace` for `pattern`, returning up to `options.limit` hits.
@@ -206,5 +302,21 @@ mod tests {
         };
         let err = search(dir.path(), "(", &options).expect_err("must fail");
         assert!(matches!(err, Error::BadPattern(_)));
+    }
+
+    #[test]
+    fn fallback_terms_drop_stopwords_and_keep_hyphenated() {
+        let terms = fallback_terms("where is the one-grep home manager module");
+        assert_eq!(terms, vec!["one-grep"]);
+    }
+
+    #[test]
+    fn fallback_search_finds_hits_without_index() {
+        let dir = workspace_with(&[("notes.txt", "one-grep hybrid search\n")]);
+        let hits =
+            fallback_search(dir.path(), "where is one-grep configured", 10).expect("fallback");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, dir.path().join("notes.txt"));
+        assert!(unindexed_note(dir.path()).contains("Indexing is available"));
     }
 }

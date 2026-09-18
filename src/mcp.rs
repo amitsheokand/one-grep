@@ -136,7 +136,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and double-quoted literals use exact rg lookup unless fts anchors are supplied. Falls back to lexical when no vector store exists."
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and double-quoted literals use exact rg lookup unless fts anchors are supplied. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
     )]
     async fn search(
         &self,
@@ -162,8 +162,11 @@ impl OneGrep {
             query.push(' ');
             query.push_str(&fts.join(" "));
         }
+        let indexed = index::is_indexed(&root);
         let fuse = p.fuse.unwrap_or(true);
-        let lines: Vec<String> = if fuse {
+        let lines: Vec<String> = if !indexed {
+            rg_fallback_lines(&root, &query, limit)?
+        } else if fuse {
             match provider() {
                 Ok(provider) => fuse::hybrid(&root, &query, limit, Some(provider), None)
                     .map_err(internal)?
@@ -184,9 +187,13 @@ impl OneGrep {
         } else {
             lexical(&root, &query, limit)?
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            lines.join("\n---\n"),
-        )]))
+        let body = lines.join("\n---\n");
+        let text = if indexed {
+            body
+        } else {
+            format!("{}\n\n{body}", rg::unindexed_note(&root))
+        };
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     #[tool(
@@ -234,14 +241,22 @@ fn lexical(root: &Path, query: &str, limit: usize) -> Result<Vec<String>, McpErr
         .collect())
 }
 
+fn rg_fallback_lines(root: &Path, query: &str, limit: usize) -> Result<Vec<String>, McpError> {
+    Ok(rg::fallback_search(root, query, limit)
+        .map_err(internal)?
+        .iter()
+        .map(|h| render(&h.path, h.line, h.line, "rg-fallback", "live", &h.text))
+        .collect())
+}
+
 #[tool_handler]
 impl rmcp::ServerHandler for OneGrep {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
             "Local-first hybrid workspace search. Prefer `search` for intent/concepts \
-             (it fuses semantic + BM25 ranks); use `rg` to verify exact text, symbols, \
-             or regex. Cite path:line evidence."
+             (it fuses semantic + BM25 ranks; live rg if the workspace is not indexed). \
+             Use `rg` to verify exact text, symbols, or regex. Cite path:line evidence."
                 .into(),
         );
         info
@@ -339,7 +354,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn intent_and_mixed_queries_stay_on_lexical_search() {
+    async fn intent_and_mixed_queries_use_rg_fallback_when_unindexed() {
         let workspace = tempfile::tempdir().expect("workspace");
         for (query, fts) in [
             ("where is authentication handled", None),
@@ -354,12 +369,13 @@ mod tests {
                     fuse: Some(false),
                     limit: None,
                 }))
-                .await;
+                .await
+                .expect("unindexed intent search falls back to live rg");
+            let text = serde_json::to_value(result).expect("response");
+            let body = text["content"][0]["text"].as_str().unwrap();
             assert!(
-                result
-                    .expect_err("lexical search needs an index")
-                    .message
-                    .contains("not indexed")
+                body.contains("Indexing is available"),
+                "{query}: {body}"
             );
         }
     }

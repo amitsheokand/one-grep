@@ -106,6 +106,19 @@ async fn main() -> Result<()> {
             hybrid,
             rerank,
         } => {
+            if !one_grep::index::is_indexed(&path) {
+                println!("{}", one_grep::rg::unindexed_note(&path));
+                for hit in one_grep::rg::fallback_search(&path, &query, limit)? {
+                    println!(
+                        "{}:{}-{} [rg-fallback] (live)\n{}",
+                        hit.path.display(),
+                        hit.line,
+                        hit.line,
+                        hit.text
+                    );
+                }
+                return Ok(());
+            }
             if hybrid || rerank {
                 let provider = match one_grep::vectors::store_model(&path)? {
                     Some(name) => one_grep::embed::FastembedProvider::load_model(

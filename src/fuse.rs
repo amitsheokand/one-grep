@@ -1,13 +1,14 @@
 //! Hybrid retrieval: BM25 + vector ranks fused with RRF.
 //!
-//! Falls back to lexical-only when no vector store exists yet.
+//! Falls back to lexical-only when no vector store exists yet, and to
+//! live rg when the workspace has no index.
 
 use std::path::{Path, PathBuf};
 
 use crate::{
     Error,
     embed::{EmbedProvider, Rerank},
-    index, vectors,
+    index, rg, vectors,
 };
 
 /// RRF smoothing constant.
@@ -49,7 +50,7 @@ fn chunk_key(path: &Path, start: u64, end: u64, breadcrumb: &str) -> String {
 /// # Errors
 ///
 /// Returns [`Error`] when lexical search fails or the query cannot be
-/// embedded.
+/// embedded. Unindexed workspaces return live rg hits instead of erroring.
 pub fn hybrid(
     workspace: &Path,
     query: &str,
@@ -57,6 +58,9 @@ pub fn hybrid(
     provider: Option<&dyn EmbedProvider>,
     reranker: Option<&dyn Rerank>,
 ) -> Result<Vec<FusedHit>, Error> {
+    if !index::is_indexed(workspace) {
+        return Ok(from_rg(rg::fallback_search(workspace, query, limit)?));
+    }
     let fetch = (limit * 10).max(50);
     let lexical = index::search(workspace, query, fetch)?;
 
@@ -257,6 +261,22 @@ fn overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> u64 {
     (a_end.min(b_end) + 1).saturating_sub(a_start.max(b_start))
 }
 
+fn from_rg(hits: Vec<rg::Hit>) -> Vec<FusedHit> {
+    hits.into_iter()
+        .enumerate()
+        .map(|(i, hit)| FusedHit {
+            path: hit.path,
+            start: hit.line,
+            end: hit.line,
+            breadcrumb: "rg-fallback".to_owned(),
+            text: hit.text,
+            score: 0.0,
+            lexical_rank: Some(i + 1),
+            vector_rank: None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,6 +288,17 @@ mod tests {
             std::fs::write(dir.path().join(name), contents).expect("write");
         }
         dir
+    }
+
+    #[test]
+    fn hybrid_without_index_falls_back_to_rg() {
+        let dir = workspace_with(&[("a.txt", "supersonic_ferret zoology\n")]);
+        let hits =
+            hybrid(dir.path(), "where is supersonic_ferret", 10, None, None).expect("hybrid");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].breadcrumb, "rg-fallback");
+        assert_eq!(hits[0].lexical_rank, Some(1));
+        assert_eq!(hits[0].vector_rank, None);
     }
 
     #[test]

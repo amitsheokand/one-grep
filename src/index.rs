@@ -224,6 +224,12 @@ pub fn sync(workspace: &Path) -> Result<Stats, Error> {
     Ok(stats)
 }
 
+/// Whether `<workspace>/.one-grep/` exists (BM25 index present).
+#[must_use]
+pub fn is_indexed(workspace: &Path) -> bool {
+    engine::index_dir(workspace).is_dir()
+}
+
 /// Run a BM25 query over chunk text and breadcrumbs.
 ///
 /// # Errors
@@ -232,7 +238,7 @@ pub fn sync(workspace: &Path) -> Result<Stats, Error> {
 /// query fails to parse, and [`Error`] when search itself fails.
 pub fn search(workspace: &Path, query: &str, limit: usize) -> Result<Vec<RankedHit>, Error> {
     let dir = engine::index_dir(workspace);
-    if !dir.is_dir() {
+    if !is_indexed(workspace) {
         return Err(Error::InvalidInput(format!(
             "workspace is not indexed (no {}); run index first",
             dir.display()
@@ -343,7 +349,16 @@ mod tests {
     #[test]
     fn search_without_index_is_invalid_input() {
         let dir = tempfile::tempdir().expect("tempdir");
+        assert!(!is_indexed(dir.path()));
         let err = search(dir.path(), "x", 10).expect_err("must fail");
         assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn is_indexed_after_sync() {
+        let dir = workspace_with(&[("a.txt", "alpha\n")]);
+        assert!(!is_indexed(dir.path()));
+        sync(dir.path()).expect("sync");
+        assert!(is_indexed(dir.path()));
     }
 }

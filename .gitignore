@@ -5,3 +5,6 @@
 benchmarks/models/
 # Upstream skill clone (nested git); see .opencode/skills/router (ours).
 .opencode/skills/rust-skills/
+# Local nix-build leftovers; never commit.
+/result
+/nix/var/
