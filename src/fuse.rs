@@ -261,6 +261,40 @@ fn overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> u64 {
     (a_end.min(b_end) + 1).saturating_sub(a_start.max(b_start))
 }
 
+/// Retrieve a shortlist: live rg when unindexed, hybrid or BM25 otherwise.
+///
+/// # Errors
+///
+/// Returns [`Error`] when walk, index, or embedding fails.
+pub fn collect(
+    workspace: &Path,
+    query: &str,
+    limit: usize,
+    fuse: bool,
+    provider: Option<&dyn EmbedProvider>,
+) -> Result<Vec<FusedHit>, Error> {
+    if !index::is_indexed(workspace) {
+        return Ok(from_rg(rg::fallback_search(workspace, query, limit)?));
+    }
+    if fuse {
+        return hybrid(workspace, query, limit, provider, None);
+    }
+    Ok(index::search(workspace, query, limit)?
+        .into_iter()
+        .enumerate()
+        .map(|(i, hit)| FusedHit {
+            path: hit.path,
+            start: hit.start,
+            end: hit.end,
+            breadcrumb: hit.breadcrumb,
+            text: hit.text,
+            score: f64::from(hit.score),
+            lexical_rank: Some(i + 1),
+            vector_rank: None,
+        })
+        .collect())
+}
+
 fn from_rg(hits: Vec<rg::Hit>) -> Vec<FusedHit> {
     hits.into_iter()
         .enumerate()
@@ -288,6 +322,14 @@ mod tests {
             std::fs::write(dir.path().join(name), contents).expect("write");
         }
         dir
+    }
+
+    #[test]
+    fn collect_without_index_uses_rg() {
+        let dir = workspace_with(&[("a.txt", "supersonic_ferret zoology\n")]);
+        let hits = collect(dir.path(), "supersonic_ferret", 10, true, None).expect("collect");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].breadcrumb, "rg-fallback");
     }
 
     #[test]

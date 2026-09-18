@@ -28,7 +28,7 @@ one-grep <COMMAND>
 | Subcommand | Arguments / Flags | Description |
 | :--- | :--- | :--- |
 | `index` | `<path>` | Indexes workspace files for BM25 and chunk extraction. Stores index in `<path>/.onegrep/`. |
-| `query` | `<query> [--path <path>] [--limit <n>] [--hybrid] [--rerank]` | Queries indexed workspace using BM25, optionally fusing vectors with RRF (`--hybrid`) or cross-encoder reranking (`--rerank`). |
+| `query` / `search` | `<query> [--path <path>] [--limit <n>] [--hybrid] [--rerank] [--rank jev\|jina]` | BM25 query; `--hybrid` fuses vectors; `--rank jev` reranks the shortlist with TypeSafe inside the tool (top-k only). `search` is an alias. |
 | `embed` | `<path> [--model minilm\|arctic-m\|gemma-300m]` | Computes embeddings for extracted chunks using local ONNX fastembed. |
 | `watch` | `<path>` | Watches workspace and incrementally updates index on file changes. |
 | `dump-chunks` | `<path>` | Dumps extracted code chunks as JSONL. |
@@ -53,13 +53,13 @@ Writes/upserts the `one-grep` entry shapes documented in §4 (stdio → `~/.loca
 
 ## 3. MCP Surface (`src/mcp.rs`)
 
-The MCP server exposes two core tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
+The MCP server exposes three tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
 
 ### Server Instructions
-> "Local-first hybrid workspace search. Prefer `search` for intent/concepts (it fuses semantic + BM25 ranks); use `rg` to verify exact text, symbols, or regex. Cite path:line evidence."
+> "Local-first hybrid workspace search. Prefer `search_ranked` for intent (retrieve + Jev inside the tool; only top-k winners enter context). Use `search` for the raw fused pool. Use `rg` for exact text, symbols, or regex. Cite path:line evidence."
 
 ### Tool: `search`
-Hybrid workspace search combining semantic discovery with BM25 lexical ranking.
+Hybrid workspace search combining semantic discovery with BM25 lexical ranking. Returns the fused shortlist (pool enters the caller).
 - **Parameters**:
   - `root` (string, required): Absolute workspace directory path.
   - `query` (string, required): Natural language query or concept description.
@@ -67,6 +67,11 @@ Hybrid workspace search combining semantic discovery with BM25 lexical ranking.
   - `fuse` (boolean, optional, default `true`): Whether to fuse vector similarity with BM25.
   - `limit` (integer, optional, default 10, max 50): Maximum result chunks.
 - **Returns**: Formatted snippets with `path:start_line-end_line [symbol_breadcrumb] (score)` citations.
+
+### Tool: `search_ranked`
+Same retrieval as `search`, then TypeSafe Jev scores each candidate inside the tool (`exists` Noul + one Noul per hit). Returns top-k only, prefixed with `rank: jev exists=…` or `rank: fallback (reason)` if the key is missing or the API fails. Exact anchors (`foo::Bar`, `"quoted"`) still route to `rg`.
+
+Key: `TYPESAFE_API_KEY`, else `~/.config/typesafe.env`, else `~/.config/environment.d/60-typesafe.conf`. Model: `JEV_MCP_MODEL` (default `jev-1.13.0`). Never log the key.
 
 ### Tool: `rg`
 Exact string or regular expression search across workspace files with gitignore filtering.

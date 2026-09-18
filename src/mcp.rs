@@ -197,6 +197,74 @@ impl OneGrep {
     }
 
     #[tool(
+        description = "Intent search with Jev ranking inside the tool: retrieve a shortlist, score each candidate, return top-k only. Pool never enters context. Falls back to unranked retrieval if Jev is unavailable. Exact anchors still belong on `rg`."
+    )]
+    async fn search_ranked(
+        &self,
+        Parameters(p): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = check_root(&p.root)?;
+        let limit = p.limit.unwrap_or(10).clamp(1, 50);
+        if p.fts.as_ref().is_none_or(|anchors| anchors.is_empty()) {
+            if let Some(pattern) = exact_pattern(&p.query) {
+                return self
+                    .rg(Parameters(RgParams {
+                        root: p.root.clone(),
+                        pattern: pattern.to_owned(),
+                        regex: Some(false),
+                        case_insensitive: Some(false),
+                        limit: Some(limit),
+                    }))
+                    .await;
+            }
+        }
+        let mut query = p.query.clone();
+        if let Some(fts) = &p.fts {
+            query.push(' ');
+            query.push_str(&fts.join(" "));
+        }
+        let fuse = p.fuse.unwrap_or(true);
+        let indexed = index::is_indexed(&root);
+        let query_for_rank = query.clone();
+        let root_for_rank = root.clone();
+        let (status, hits) = tokio::task::spawn_blocking(move || {
+            let hits = if !indexed {
+                fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
+            } else if fuse {
+                match provider() {
+                    Ok(p) => fuse::collect(&root_for_rank, &query_for_rank, limit, true, Some(p)),
+                    Err(_) => fuse::collect(&root_for_rank, &query_for_rank, limit, false, None),
+                }
+            } else {
+                fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
+            }?;
+            Ok::<_, crate::Error>(crate::jev::rerank_hits(&query_for_rank, hits))
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))?
+        .map_err(internal)?;
+        let body = hits
+            .iter()
+            .map(|h| {
+                render(
+                    &h.path,
+                    h.start,
+                    h.end,
+                    &h.breadcrumb,
+                    &format!("{:.4}", h.score),
+                    &h.text,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        let mut text = format!("{}\n\n{body}", status.note);
+        if !indexed {
+            text = format!("{}\n{}\n\n{body}", status.note, rg::unindexed_note(&root));
+        }
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    #[tool(
         description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
@@ -254,9 +322,10 @@ impl rmcp::ServerHandler for OneGrep {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
         info.instructions = Some(
-            "Local-first hybrid workspace search. Prefer `search` for intent/concepts \
-             (it fuses semantic + BM25 ranks; live rg if the workspace is not indexed). \
-             Use `rg` to verify exact text, symbols, or regex. Cite path:line evidence."
+            "Local-first hybrid workspace search. Prefer `search_ranked` for intent \
+             (retrieve + Jev inside the tool; only top-k winners enter context). \
+             Use `search` for the raw fused pool. Use `rg` for exact text, symbols, \
+             or regex. Cite path:line evidence."
                 .into(),
         );
         info
@@ -373,11 +442,28 @@ mod tests {
                 .expect("unindexed intent search falls back to live rg");
             let text = serde_json::to_value(result).expect("response");
             let body = text["content"][0]["text"].as_str().unwrap();
-            assert!(
-                body.contains("Indexing is available"),
-                "{query}: {body}"
-            );
+            assert!(body.contains("Indexing is available"), "{query}: {body}");
         }
+    }
+
+    #[tokio::test]
+    async fn search_ranked_unindexed_emits_rank_header() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.txt"), "supersonic_ferret\n").expect("write");
+        let result = OneGrep::new()
+            .search_ranked(Parameters(SearchParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                query: "where is supersonic_ferret".into(),
+                fts: None,
+                fuse: Some(false),
+                limit: Some(5),
+            }))
+            .await
+            .expect("ranked search");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("rank:"), "{body}");
+        assert!(body.contains("Indexing is available"), "{body}");
     }
 
     #[tokio::test]

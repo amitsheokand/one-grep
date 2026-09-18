@@ -13,6 +13,7 @@ enum Command {
     /// Index a workspace for hybrid search.
     Index { path: std::path::PathBuf },
     /// Query an indexed workspace (BM25 over chunks).
+    #[command(alias = "search")]
     Query {
         /// Query text.
         query: String,
@@ -26,9 +27,13 @@ enum Command {
         /// matching the vector store.
         #[arg(long)]
         hybrid: bool,
-        /// Rescore fused top-20 with a cross-encoder (implies hybrid).
+        /// Rescore fused top-20 with a local cross-encoder (implies hybrid).
         #[arg(long)]
         rerank: bool,
+        /// Rank the retrieval shortlist inside the tool: `jev` (TypeSafe)
+        /// or `jina` (local cross-encoder).
+        #[arg(long, value_name = "BACKEND")]
+        rank: Option<String>,
     },
     /// Embed workspace chunks for hybrid search.
     Embed {
@@ -105,8 +110,49 @@ async fn main() -> Result<()> {
             limit,
             hybrid,
             rerank,
+            rank,
         } => {
-            if !one_grep::index::is_indexed(&path) {
+            let rank_jev = rank.as_deref() == Some("jev");
+            let rank_jina = rerank || rank.as_deref() == Some("jina");
+            if rank_jev && rank_jina {
+                anyhow::bail!("use --rank jev or --rerank / --rank jina, not both");
+            }
+            let indexed = one_grep::index::is_indexed(&path);
+            if rank_jev {
+                let hits = if indexed && (hybrid || rank_jev) {
+                    let provider = match one_grep::vectors::store_model(&path)? {
+                        Some(name) => one_grep::embed::FastembedProvider::load_model(
+                            one_grep::embed::OnnxModel::parse_stored(&name)?,
+                        )?,
+                        None => one_grep::embed::FastembedProvider::load()?,
+                    };
+                    one_grep::fuse::collect(&path, &query, limit, true, Some(&provider))?
+                } else {
+                    one_grep::fuse::collect(&path, &query, limit, false, None)?
+                };
+                let q = query.clone();
+                let (status, hits) = tokio::task::spawn_blocking(move || {
+                    one_grep::jev::rerank_hits(&q, hits)
+                })
+                .await?;
+                println!("{}", status.note);
+                if !indexed {
+                    println!("{}", one_grep::rg::unindexed_note(&path));
+                }
+                for hit in hits {
+                    println!(
+                        "{}:{}-{} [{}] ({:.4})\n{}",
+                        hit.path.display(),
+                        hit.start,
+                        hit.end,
+                        hit.breadcrumb,
+                        hit.score,
+                        hit.text
+                    );
+                }
+                return Ok(());
+            }
+            if !indexed {
                 println!("{}", one_grep::rg::unindexed_note(&path));
                 for hit in one_grep::rg::fallback_search(&path, &query, limit)? {
                     println!(
@@ -119,14 +165,14 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            if hybrid || rerank {
+            if hybrid || rank_jina {
                 let provider = match one_grep::vectors::store_model(&path)? {
                     Some(name) => one_grep::embed::FastembedProvider::load_model(
                         one_grep::embed::OnnxModel::parse_stored(&name)?,
                     )?,
                     None => one_grep::embed::FastembedProvider::load()?,
                 };
-                let reranker = rerank
+                let reranker = rank_jina
                     .then(one_grep::embed::JinaReranker::load)
                     .transpose()?;
                 for hit in one_grep::fuse::hybrid(

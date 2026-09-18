@@ -1,7 +1,7 @@
 # one-grep
 
 Local-first hybrid workspace search: ripgrep + BM25 + ONNX embeddings, with an
-in-tree MCP server (`search` + `rg`).
+in-tree MCP server (`search`, `search_ranked`, `rg`).
 
 Public repo: [github.com/amitsheokand/one-grep](https://github.com/amitsheokand/one-grep).
 The CLI and crate are **`one-grep`**.
@@ -10,6 +10,7 @@ The CLI and crate are **`one-grep`**.
 one-grep index /path/to/workspace
 one-grep embed /path/to/workspace
 one-grep query "where is authentication handled?" --path /path/to/workspace --hybrid
+one-grep query "where is authentication handled?" --path /path/to/workspace --rank jev
 one-grep serve --stdio
 ```
 

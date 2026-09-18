@@ -29,4 +29,7 @@ pub enum Error {
     /// Embedding failed.
     #[error("embed: {0}")]
     Embed(String),
+    /// TypeSafe / Jev ranking failed. Messages never include the API key.
+    #[error("jev: {0}")]
+    Jev(String),
 }
