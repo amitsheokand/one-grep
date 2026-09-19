@@ -7,6 +7,7 @@ pub mod chains;
 pub mod embed;
 pub mod engine;
 pub mod error;
+pub mod eval;
 pub mod extract;
 pub mod fuse;
 pub mod index;
