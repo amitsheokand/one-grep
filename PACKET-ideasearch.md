@@ -80,14 +80,25 @@ Retain reproducible receipts: query-set version, revision, backend/model version
 
 Tests must cover deterministic routing, unavailable LSP servers, cancellation, unsupported capabilities, invalid locations, shortlist-only absence claims, invalid candidate IDs, and stable fallback ordering.
 
-## Delivery order
+## Delivery queue
 
-1. Establish labeled queries and baseline receipts.
-2. Formalize exact/intent/navigation routing and result provenance.
-3. Integrate Rust LSP navigation with `rust-analyzer`.
-4. Add opt-in `exists`/`where` evaluation over existing shortlists with validated outputs and fallback.
-5. Add typed relevance facets and compare against baseline.
-6. Consider another embedder only if evidence shows first-stage recall remains the limiting factor.
+One increment at a time, in order. Checked items are merged to `main`.
+
+- [x] Labeled queries and baseline receipts (`src/eval.rs`).
+- [x] Exact/intent routing with provenance (exact anchors to `rg`, live rg
+      fallback when unindexed, Jev-ranked `search_ranked`).
+- [x] Rust LSP `definition` navigation with `rust-analyzer` (`src/lsp.rs`,
+      MCP `definition` tool).
+- [ ] Rust LSP `references` and `implementation` tools (same pool client,
+      validation, and rendering pattern as `definition`).
+- [ ] Opt-in `exists`/`where` evaluation over existing shortlists with
+      validated candidate IDs, calibrated abstention, and fallback.
+- [ ] Typed relevance facets combined in code, compared against the
+      phase-1 baseline.
+- [ ] Pool idle eviction and shutdown hook for the long-lived MCP process.
+- [ ] `didOpen` sync so unsaved buffer contents are navigable.
+- [ ] Another embedder, only if evidence shows first-stage recall remains
+      the limiting factor.
 
 ## Sources
 
