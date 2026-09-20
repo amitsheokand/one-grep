@@ -13,6 +13,7 @@ pub mod fuse;
 pub mod index;
 pub mod install;
 pub mod jev;
+pub mod lsp;
 pub mod mcp;
 pub mod rg;
 pub mod vectors;

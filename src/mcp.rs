@@ -18,7 +18,7 @@ use rmcp::{
     },
 };
 
-use crate::{embed::FastembedProvider, fuse, index, rg};
+use crate::{embed::FastembedProvider, fuse, index, lsp, rg};
 use serde::Deserialize;
 
 /// Max chars of chunk text per tool hit.
@@ -58,6 +58,29 @@ fn exact_pattern(query: &str) -> Option<&str> {
 
 fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// Resolve a relative-or-absolute file against the workspace root,
+/// rejecting lexical escapes. Existence is checked by the caller.
+fn resolve_in_root(root: &Path, raw: &str) -> Option<PathBuf> {
+    let joined = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        root.join(raw)
+    };
+    let mut normal = PathBuf::new();
+    for component in joined.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normal.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normal.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normal.pop();
+            }
+            std::path::Component::Normal(part) => normal.push(part),
+        }
+    }
+    normal.starts_with(root).then_some(normal)
 }
 
 fn render(
@@ -102,6 +125,20 @@ struct SearchParams {
     fuse: Option<bool>,
     /// Max hits (default 10, max 50).
     limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct DefinitionParams {
+    /// Absolute workspace root.
+    root: String,
+    /// File containing the reference, relative to root or absolute.
+    path: String,
+    /// 1-based line number of the reference.
+    line: u32,
+    /// 1-based character (Unicode scalar) of the reference on the line.
+    character: u32,
+    /// Server command override (default `rust-analyzer` from PATH).
+    server: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -265,6 +302,59 @@ impl OneGrep {
     }
 
     #[tool(
+        description = "Rust definition navigation via rust-analyzer: jump from a reference to its definition. Takes a 1-based line and character. Returns path:line evidence; targets outside the workspace are marked external. Needs saved files and a resolvable rust-analyzer."
+    )]
+    async fn definition(
+        &self,
+        Parameters(p): Parameters<DefinitionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = check_root(&p.root)?;
+        let file = resolve_in_root(&root, &p.path).ok_or_else(|| {
+            McpError::invalid_params(format!("path escapes workspace root: {}", p.path), None)
+        })?;
+        if p.line < 1 || p.character < 1 {
+            return Err(McpError::invalid_params(
+                "line and character are 1-based",
+                None,
+            ));
+        }
+        let options = lsp::Options {
+            command: p.server.unwrap_or_else(|| lsp::DEFAULT_COMMAND.to_owned()),
+            ..Default::default()
+        };
+        let targets = lsp::definition(&options, &root, &file, p.line, p.character)
+            .await
+            .map_err(internal)?;
+        if targets.is_empty() {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "no definition found at {}:{}:{} (rust-analyzer)",
+                file.display(),
+                p.line,
+                p.character
+            ))]));
+        }
+        let lines: Vec<String> = targets
+            .iter()
+            .map(|t| {
+                let scope = if t.outside_root {
+                    "external"
+                } else {
+                    "workspace"
+                };
+                format!(
+                    "{}:{}-{} ({scope})",
+                    t.path.display(),
+                    t.start_line,
+                    t.end_line
+                )
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![ContentBlock::text(
+            lines.join("\n"),
+        )]))
+    }
+
+    #[tool(
         description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
@@ -325,7 +415,8 @@ impl rmcp::ServerHandler for OneGrep {
             "Local-first hybrid workspace search. Prefer `search_ranked` for intent \
              (retrieve + Jev inside the tool; only top-k winners enter context). \
              Use `search` for the raw fused pool. Use `rg` for exact text, symbols, \
-             or regex. Cite path:line evidence."
+             or regex. Use `definition` to jump from a Rust reference to its \
+             definition. Cite path:line evidence."
                 .into(),
         );
         info
@@ -464,6 +555,67 @@ mod tests {
         let body = text["content"][0]["text"].as_str().unwrap();
         assert!(body.contains("rank:"), "{body}");
         assert!(body.contains("Indexing is available"), "{body}");
+    }
+
+    #[test]
+    fn definition_paths_stay_inside_the_workspace() {
+        let root = Path::new("/ws");
+        assert_eq!(
+            resolve_in_root(root, "src/main.rs"),
+            Some(PathBuf::from("/ws/src/main.rs"))
+        );
+        assert_eq!(
+            resolve_in_root(root, "/ws/src/main.rs"),
+            Some(PathBuf::from("/ws/src/main.rs"))
+        );
+        assert_eq!(resolve_in_root(root, "../escape.rs"), None);
+        assert_eq!(resolve_in_root(root, "a/../../escape.rs"), None);
+        assert_eq!(resolve_in_root(root, "/etc/passwd"), None);
+    }
+
+    #[tokio::test]
+    async fn definition_rejects_bad_locations_before_spawning() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let err = OneGrep::new()
+            .definition(Parameters(DefinitionParams {
+                root: root.clone(),
+                path: "../escape.rs".into(),
+                line: 1,
+                character: 1,
+                server: None,
+            }))
+            .await
+            .expect_err("escape must fail");
+        assert!(err.message.contains("escapes"), "{err:?}");
+        let err = OneGrep::new()
+            .definition(Parameters(DefinitionParams {
+                root,
+                path: "a.rs".into(),
+                line: 0,
+                character: 1,
+                server: None,
+            }))
+            .await
+            .expect_err("line 0 must fail");
+        assert!(err.message.contains("1-based"), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn definition_missing_server_is_an_error_not_empty() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.rs"), "fn a() {}\n").expect("fixture");
+        let err = OneGrep::new()
+            .definition(Parameters(DefinitionParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                path: "a.rs".into(),
+                line: 1,
+                character: 1,
+                server: Some("one-grep-definitely-no-such-server".into()),
+            }))
+            .await
+            .expect_err("missing server must fail");
+        assert!(err.message.contains("could not start"), "{err:?}");
     }
 
     #[tokio::test]

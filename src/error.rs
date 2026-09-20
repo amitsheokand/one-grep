@@ -32,4 +32,11 @@ pub enum Error {
     /// TypeSafe / Jev ranking failed. Messages never include the API key.
     #[error("jev: {0}")]
     Jev(String),
+    /// Language-server navigation failed (missing server, timeout, protocol).
+    #[error("lsp: {0}")]
+    Lsp(String),
+    /// The server answered with an error payload (it is alive; the pooled
+    /// connection stays reusable).
+    #[error("lsp server error: {0}")]
+    LspServer(String),
 }
