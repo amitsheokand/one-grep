@@ -219,6 +219,28 @@ windows-rs + big Rust crates before claiming the win.
   skips index/build/vcs dirs. Live-verified (burst → single sync).
 - Harness `rg -l` now `--sort path` (deterministic recall).
 
+## Run 11 — intent paths on the frozen v2 fixture (2026-09-24)
+
+`ideasearch-v2`: 12 cases (3 keyword / 3 paraphrase / 2 symbol /
+2 chain / 2 unanswerable) over a 6-file synthetic fixture incl. one
+TypeScript file. Lexical via `eval::evaluate`, hybrid MiniLM via the
+ignored `measure_hybrid_v2_reports` test (vectors synced in tmpdir).
+
+| backend | R@1 | R@3 | keyword | paraphrase | symbol | chain | p50 | p95 |
+|---|---|---|---|---|---|---|---|---|
+| lexical BM25 | 0.80 | 0.90 | 1.0 | 0.667 | 1.0 | 1.0 | — | — |
+| hybrid MiniLM | 0.80 | **1.00** | 1.0 | **1.0** | 1.0 | 1.0 | 6.0 ms | 9.7 ms |
+
+Reads: hybrid fixes exactly the pinned weak spot (the third paraphrase)
+with no keyword/symbol/chain regression — the 1.3 gate as specified.
+Caveat, stated plainly: this is a 10-answerable toy. Real-corpus Run 9
+says the opposite on nixos concepts (hybrid 1/4 vs lexical 2/4). So the
+claim is narrow: MiniLM bridges short-distance paraphrase
+("password"→"credentials"); genuine intent ("where do build outputs go"
+at repo scale) still needs more. Next candidate: LocalJev as the ranker
+— its wire path (`TYPESAFE_BASE_URL` → any SystemOne endpoint) is now
+covered by a std-only mock round-trip test in `src/jev.rs`, no network.
+
 ## Run 9 (2026-09-24): re-run on Linux after quote + plant changes
 
 Same harness (`benchmarks/bench.py`, best-of-3, recall@3), fresh release

@@ -324,14 +324,32 @@ pub fn fixture_workspace_v2(dir: &Path) -> Result<(), Error> {
 
 /// Run the labeled set against an indexed workspace with lexical search.
 pub fn evaluate(workspace: &Path, cases: &[QueryCase], limit: usize) -> Result<Report, Error> {
+    evaluate_with(cases, limit, |query, lim| {
+        index::search(workspace, query, lim).map(|hits| {
+            hits.iter()
+                .map(|h| h.path.to_string_lossy().into_owned())
+                .collect()
+        })
+    })
+}
+
+/// Run the labeled set with any retrieval path (lexical, hybrid, ranked).
+/// `search` returns hit path strings in rank order; ranks and latencies are
+/// measured the same way for every backend, so numbers stay comparable.
+pub fn evaluate_with(
+    cases: &[QueryCase],
+    limit: usize,
+    search: impl Fn(&str, usize) -> Result<Vec<String>, Error>,
+) -> Result<Report, Error> {
     let mut outcomes = Vec::with_capacity(cases.len());
     for case in cases {
         let start = Instant::now();
-        let hits = index::search(workspace, case.query, limit)?;
+        let paths = search(case.query, limit)?;
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
         let rank = case.expected.and_then(|expected| {
-            hits.iter()
-                .position(|h| h.path.to_string_lossy().contains(expected))
+            paths
+                .iter()
+                .position(|p| p.contains(expected))
                 .map(|i| i + 1)
         });
         outcomes.push(QueryOutcome {
@@ -340,7 +358,7 @@ pub fn evaluate(workspace: &Path, cases: &[QueryCase], limit: usize) -> Result<R
             query: case.query,
             expected: case.expected,
             rank,
-            hits: hits.len(),
+            hits: paths.len(),
             latency_ms,
         });
     }
@@ -523,6 +541,39 @@ mod tests {
             report.recall_at_3 + EPS >= OVERALL_R3_FLOOR,
             "overall R@3 dropped: {:.3} < {OVERALL_R3_FLOOR:.3}",
             report.recall_at_3
+        );
+    }
+
+    /// Intent-path measurement (`ideasearch-v2`, hybrid MiniLM).
+    ///
+    /// Ignored by default: loads the embedding model (downloads MiniLM on
+    /// first run) and embeds the fixture. Run explicitly to compare the
+    /// hybrid concept numbers against the pinned lexical floors before
+    /// promoting any ranker to default:
+    /// `cargo test --lib measure_hybrid_v2 -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs embedding model + vector sync"]
+    fn measure_hybrid_v2_reports() {
+        use crate::{embed::FastembedProvider, fuse, vectors};
+
+        let dir = indexed_fixture_v2();
+        let provider = FastembedProvider::load().expect("embedding model");
+        vectors::sync(dir.path(), &provider).expect("sync vectors");
+        let report = evaluate_with(CASES_V2, RECALL_WIDE_K, |query, lim| {
+            fuse::hybrid(dir.path(), query, lim, Some(&provider), None).map(|hits| {
+                hits.iter()
+                    .map(|h| h.path.to_string_lossy().into_owned())
+                    .collect()
+            })
+        })
+        .expect("evaluate");
+        eprintln!(
+            "HYBRID-MEASURE r1={:.3} r3={:.3} p50={:.1}ms p95={:.1}ms kinds={}",
+            report.recall_at_1,
+            report.recall_at_3,
+            report.latency_p50_ms,
+            report.latency_p95_ms,
+            serde_json::to_string(&report.kind_recall_at_3).unwrap_or_default()
         );
     }
 }

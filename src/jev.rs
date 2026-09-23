@@ -458,4 +458,49 @@ mod tests {
         assert!(msg.contains("<redacted>"));
         assert!(!msg.contains("super-secret-key"));
     }
+
+    /// The `TYPESAFE_BASE_URL` override points the ranker at any
+    /// SystemOne-wire-compatible endpoint (hosted Jev, LocalJev, OpenJev).
+    /// A std-only mock proves the full round trip without network.
+    #[test]
+    fn jev_reranker_round_trips_systemone_wire() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let body = r#"{"answers":{"exists":{"type":"noul","noul":0.9},"c0":{"type":"noul","noul":0.2},"c1":{"type":"noul","noul":0.7}}}"#;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = vec![0u8; 65536];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        let prev_key = std::env::var(ENV_API_KEY).ok();
+        let prev_url = std::env::var(ENV_BASE_URL).ok();
+        // SAFETY: no other test in this binary reads these vars
+        // concurrently in a way that changes its verdict ( Jev callers all
+        // fail closed to the same fallback order on error).
+        unsafe {
+            std::env::set_var(ENV_API_KEY, "mock-key");
+            std::env::set_var(ENV_BASE_URL, format!("http://{addr}"));
+        }
+        let order = JevReranker::from_env().and_then(|r| r.rerank("q", &["alpha", "bravo"]));
+        unsafe {
+            match prev_key {
+                Some(v) => std::env::set_var(ENV_API_KEY, v),
+                None => std::env::remove_var(ENV_API_KEY),
+            }
+            match prev_url {
+                Some(v) => std::env::set_var(ENV_BASE_URL, v),
+                None => std::env::remove_var(ENV_BASE_URL),
+            }
+        }
+        handle.join().expect("mock server");
+        assert_eq!(order.expect("rerank"), vec![(1, 0.7), (0, 0.2)]);
+    }
 }
