@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
-#[command(name = "one-grep", about = "Local-first hybrid workspace search")]
+#[command(name = "one-grep", version, about = "Local-first hybrid workspace search")]
 struct Cli {
     #[command(subcommand)]
     command: Command,

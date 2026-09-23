@@ -62,7 +62,7 @@ pure-vector held R@1/R@3/R@10 base 0.37/0.52/0.66 → ft2 **0.52/0.67/0.78**.
 Scale case: Hipfire Rust monorepo (127 MB, 1013 `.rs` files) indexes ~40k
 chunks / 46k vectors.
 
-Test suite: `cargo test --lib` — 73 passed, 0 failed (includes `rg`,
+Test suite: `cargo test --lib` — 80 passed, 0 failed (includes `rg`,
 `index`, `fuse`, `vectors`, `mcp`, `lsp`, `eval`).
 
 ## Requirements
@@ -99,6 +99,19 @@ Notes:
 * `install --http` is valid for `opencode` only; otherwise stdio entries
   using `~/.local/bin/one-grep` when present.
 
+## Agent install (fresh machine, ~2 min)
+
+```bash
+cargo install --git https://github.com/amitsheokand/one-grep
+one-grep --version                                   # expect one-grep 0.1.0
+one-grep install --target opencode                   # or cursor|pi|muse|hermes|command-code
+one-grep index ~/my-repo && one-grep embed ~/my-repo # first embed downloads MiniLM once
+one-grep query "where is auth handled?" --path ~/my-repo --hybrid
+```
+
+No API key needed until `query --rank jev` / `search_ranked` with Jev;
+without one they emit `rank: fallback` and keep retrieval order.
+
 ## MCP tools
 
 Server instructions: prefer `search_ranked` for intent (retrieve + Jev
@@ -110,7 +123,7 @@ pool, `rg` for exact text/symbols/regex. Cite `path:line` evidence.
 | `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score)` chunks; `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set |
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
-| `rg` | `root*`, `pattern*`, `regex?=false`, `case_insensitive?=false`, `limit?=100` (1–500) | `path:line:text` lines, gitignore-aware |
+| `rg` | `root*`, `pattern*`, `regex?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `limit?=100` (1–500) | `path:line:text` lines, gitignore-aware |
 
 ## Install targets
 
