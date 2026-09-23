@@ -11,7 +11,7 @@ use crate::Error;
 /// Extractor version. Bump when chunking rules change; the index sync
 /// treats a mismatch as a full reindex (chunk IDs of unchanged content
 /// stay stable, so vectors re-embed incrementally).
-pub const EXTRACT_VERSION: &str = "1";
+pub const EXTRACT_VERSION: &str = "2";
 
 /// How a chunk was derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +91,13 @@ pub const EMBED_WINDOW: Window = (50, 40);
 /// is searchable enough in its first lines (Run 12: headers must exist,
 /// but need not be whole).
 pub const HEADER_CAP_LINES: usize = 30;
+/// Symbols longer than this are split (Run 12: 130–250-line symbols dilute
+/// BM25 length-norm and mismatch the 50-line embed windows). Parts keep
+/// the parent breadcrumb with a `[i/n]` suffix. Sections stay whole:
+/// splitting prose breaks section coherence.
+pub const SYMBOL_CAP_LINES: usize = 80;
+/// Step for symbol splits (15-line overlap, like the fallback windows).
+pub const SYMBOL_STEP_LINES: usize = 65;
 
 /// Leading `#` / `//` comment block as its own chunk (Run 12: file-header
 /// prose like "Exclusive MLX lane switcher" otherwise vanishes — symbol
@@ -228,7 +235,45 @@ pub fn extract_with(path: &Path, text: &str, window: Window) -> Vec<Chunk> {
     if let Some(header) = header_chunk(path, text, extension) {
         chunks.insert(0, header);
     }
+    split_oversized(path, text, &mut chunks);
     chunks
+}
+
+/// Split over-long symbol chunks into overlapping parts. Parts inherit the
+/// parent breadcrumb with a `[i/n]` suffix so symbol context survives the
+/// split and chunk IDs stay deterministic.
+fn split_oversized(path: &Path, text: &str, chunks: &mut Vec<Chunk>) {
+    let total_lines = text.lines().count() as u64;
+    let mut out = Vec::with_capacity(chunks.len());
+    for chunk in chunks.drain(..) {
+        if chunk.kind != ChunkKind::Symbol || chunk.end <= chunk.start + SYMBOL_CAP_LINES as u64 {
+            out.push(chunk);
+            continue;
+        }
+        let span = chunk.end - chunk.start + 1;
+        let n = ((span - SYMBOL_CAP_LINES as u64 + SYMBOL_STEP_LINES as u64 - 1)
+            / SYMBOL_STEP_LINES as u64
+            + 1) as usize;
+        let mut start = chunk.start;
+        for i in 0..n {
+            let end = (start + SYMBOL_CAP_LINES as u64 - 1)
+                .min(chunk.end)
+                .min(total_lines.max(1));
+            out.push(Chunk {
+                path: path.to_path_buf(),
+                start,
+                end,
+                kind: ChunkKind::Symbol,
+                breadcrumb: format!("{} [{}/{}]", chunk.breadcrumb, i + 1, n),
+                text: slice_lines(text, (start - 1) as usize, (end - 1) as usize),
+            });
+            if end >= chunk.end {
+                break;
+            }
+            start += SYMBOL_STEP_LINES as u64;
+        }
+    }
+    *chunks = out;
 }
 
 fn node_text<'b>(node: tree_sitter::Node<'_>, bytes: &'b [u8]) -> &'b str {
@@ -578,6 +623,37 @@ mod tests {
             .find(|c| c.breadcrumb == "(header)")
             .expect("header chunk");
         assert_eq!((header.start, header.end), (1, HEADER_CAP_LINES as u64));
+    }
+
+    #[test]
+    fn oversized_symbol_splits_with_inherited_crumbs() {
+        let mut text = String::from("fn big() {\n");
+        for i in 0..100 {
+            text.push_str(&format!("    let x{i} = {i};\n"));
+        }
+        text.push_str("}\n");
+        let chunks = extract(Path::new("a.rs"), &text);
+        let parts: Vec<&Chunk> = chunks
+            .iter()
+            .filter(|c| c.breadcrumb.contains("big ["))
+            .collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].breadcrumb, "big [1/2]");
+        assert_eq!(parts[1].breadcrumb, "big [2/2]");
+        assert!(parts.iter().all(|c| c.kind == ChunkKind::Symbol));
+        // Full coverage with overlap, no gaps.
+        assert_eq!(parts[0].start, 1);
+        assert!(parts[0].end >= parts[1].start - 15);
+        assert_eq!(parts[1].end, 102);
+        assert!(parts[0].text.contains("let x0"));
+        assert!(parts[1].text.contains("let x99"));
+    }
+
+    #[test]
+    fn small_symbol_stays_whole() {
+        let chunks = extract(Path::new("a.rs"), "fn tiny() {}\n");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].breadcrumb, "tiny");
     }
 
     #[test]

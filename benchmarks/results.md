@@ -276,6 +276,20 @@ hybrid #6. Incremental embed for the 184 new chunks took seconds
 friends) — the corpus gap is closed; what remains is ranking, for the
 RRF-spread experiment next.
 
+## Run 12 fix verified — symbol size cap (2026-09-24)
+
+Implemented: `Symbol` chunks spanning >80 lines split into overlapping
+parts (80/65, breadcrumb `parent [i/n]`); sections stay whole;
+extractor version bumped to 2 (auto full re-extract, stable IDs keep
+vectors incremental). Live: the 130-line `initContent` is now
+`zsh > initContent [1/2]` (30–109) + `[2/2]` (95–160); the distinctive
+sub-query "never committed" surfaces the secrets answer at #8
+(previously buried past top-30 inside the giant chunk). The full NL
+query still drowns in `tokens` TF-noise (`estimate_tokens`) — dilution
+fixed, sense disambiguation outstanding (LocalJev experiment). "never
+both" holds #4 (no regression). v2 gate untouched by construction
+(fixture files are tiny; floors re-verified green).
+
 ## Run 11 — intent paths on the frozen v2 fixture (2026-09-24)
 
 `ideasearch-v2`: 12 cases (3 keyword / 3 paraphrase / 2 symbol /
