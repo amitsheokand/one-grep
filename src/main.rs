@@ -49,6 +49,13 @@ enum Command {
         /// Rank the retrieval shortlist inside the tool.
         #[arg(long, value_enum)]
         rank: Option<RankBackend>,
+        /// Fuse ast-grep structural hits as a third RRF list (implies
+        /// hybrid; needs `--ast-lang` and the `ast-grep` binary on PATH).
+        #[arg(long, value_name = "PATTERN")]
+        ast: Option<String>,
+        /// Language for `--ast` (same vocabulary as `rg --lang`).
+        #[arg(long, value_name = "LANG")]
+        ast_lang: Option<String>,
         /// Emit hits as a JSON array instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -74,6 +81,10 @@ enum Command {
         /// Treat pattern as regex instead of literal text.
         #[arg(long)]
         regex: bool,
+        /// Interpret the pattern structurally via ast-grep (needs exactly
+        /// one `--lang`; requires the `ast-grep` binary on PATH).
+        #[arg(long)]
+        structural: bool,
         /// Case-insensitive matching.
         #[arg(long)]
         case_insensitive: bool,
@@ -122,6 +133,30 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 
+/// First line of a possibly multi-line match, for `path:line:text` output.
+fn first_line(text: &str) -> &str {
+    text.lines().next().unwrap_or("")
+}
+
+/// Fuse `--ast` structural hits as a third RRF list. No-op without `--ast`.
+fn fuse_ast(
+    path: &std::path::Path,
+    hits: &mut Vec<one_grep::fuse::FusedHit>,
+    limit: usize,
+    ast: &Option<String>,
+    ast_lang: &Option<String>,
+) -> Result<()> {
+    let (Some(pattern), Some(lang)) = (ast, ast_lang) else {
+        return Ok(());
+    };
+    let found = one_grep::astg::search(path, pattern, lang, limit)?;
+    let refs: Vec<(std::path::PathBuf, u64)> =
+        found.into_iter().map(|h| (h.path, h.line)).collect();
+    one_grep::fuse::apply_ast(hits, &refs);
+    hits.truncate(limit);
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -147,6 +182,8 @@ async fn main() -> Result<()> {
             hybrid,
             rerank,
             rank,
+            ast,
+            ast_lang,
             json,
         } => {
             // `--rerank` and `--rank` conflict at parse time, so this match
@@ -160,6 +197,15 @@ async fn main() -> Result<()> {
             };
             let rank_jev = backend == Some(RankBackend::Jev);
             let rank_jina = backend == Some(RankBackend::Jina);
+            // `--ast` implies hybrid retrieval: the structural hits fuse as
+            // a third RRF list over the fused shortlist.
+            if ast.is_some() && ast_lang.is_none() {
+                anyhow::bail!("--ast needs --ast-lang");
+            }
+            if ast.is_some() && !one_grep::astg::available() {
+                anyhow::bail!("ast-grep not found on PATH (or ONE_GREP_AST_GREP)");
+            }
+            let hybrid = hybrid || ast.is_some();
             let indexed = one_grep::index::is_indexed(&path);
             // Shared router: explicit flags force intent; otherwise exact
             // anchors go rg and single tokens go BM25, like MCP `search`.
@@ -215,7 +261,7 @@ async fn main() -> Result<()> {
                 }
             }
             if rank_jev {
-                let hits = if indexed && (hybrid || rank_jev) {
+                let mut hits = if indexed && (hybrid || rank_jev) {
                     let provider = match one_grep::vectors::store_model(&path)? {
                         Some(name) => one_grep::embed::FastembedProvider::load_model(
                             one_grep::embed::OnnxModel::parse_stored(&name)?,
@@ -226,6 +272,7 @@ async fn main() -> Result<()> {
                 } else {
                     one_grep::fuse::collect(&path, &query, limit, false, None)?
                 };
+                fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
                 let q = query.clone();
                 let (status, hits) = tokio::task::spawn_blocking(move || {
                     one_grep::jev::rerank_hits(&q, hits)
@@ -269,7 +316,45 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             if !indexed {
-                let hits = one_grep::rg::fallback_search(&path, &query, limit)?;
+                let live = one_grep::rg::fallback_search(&path, &query, limit)?;
+                // Structural fusion applies even without an index: the live
+                // hits become single-line fused slots first.
+                if ast.is_some() {
+                    let mut fused: Vec<one_grep::fuse::FusedHit> = live
+                        .into_iter()
+                        .map(|h| one_grep::fuse::FusedHit {
+                            path: h.path,
+                            start: h.line,
+                            end: h.line,
+                            breadcrumb: "rg-fallback".to_owned(),
+                            text: h.text,
+                            score: 0.0,
+                            lexical_rank: None,
+                            vector_rank: None,
+                            ast_rank: None,
+                        })
+                        .collect();
+                    fuse_ast(&path, &mut fused, limit, &ast, &ast_lang)?;
+                    if json {
+                        eprintln!("{}", one_grep::rg::unindexed_note(&path));
+                        print_json(&fused)?;
+                        return Ok(());
+                    }
+                    println!("{}", one_grep::rg::unindexed_note(&path));
+                    for hit in fused {
+                        println!(
+                            "{}:{}-{} [{}] ({:.4})\n{}",
+                            hit.path.display(),
+                            hit.start,
+                            hit.end,
+                            hit.breadcrumb,
+                            hit.score,
+                            hit.text
+                        );
+                    }
+                    return Ok(());
+                }
+                let hits = live;
                 if json {
                     eprintln!("{}", one_grep::rg::unindexed_note(&path));
                     print_json(&hits)?;
@@ -297,13 +382,14 @@ async fn main() -> Result<()> {
                 let reranker = rank_jina
                     .then(one_grep::embed::JinaReranker::load)
                     .transpose()?;
-                let hits = one_grep::fuse::hybrid(
+                let mut hits = one_grep::fuse::hybrid(
                     &path,
                     &query,
                     limit,
                     Some(&provider),
                     reranker.as_ref().map(|r| r as &dyn one_grep::embed::Rerank),
                 )?;
+                fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
                 if json {
                     if one_grep::index::is_stale(&path) {
                         eprintln!("{}", one_grep::index::stale_note(&path));
@@ -406,12 +492,38 @@ async fn main() -> Result<()> {
             pattern,
             path,
             regex,
+            structural,
             case_insensitive,
             lang,
             glob,
             limit,
             json,
         } => {
+            if structural {
+                if regex {
+                    anyhow::bail!("--structural and --regex cannot be combined");
+                }
+                let [lang] = lang.as_slice() else {
+                    anyhow::bail!("--structural needs exactly one --lang");
+                };
+                if !one_grep::astg::available() {
+                    anyhow::bail!("ast-grep not found on PATH (or ONE_GREP_AST_GREP)");
+                }
+                let hits = one_grep::astg::search(&path, &pattern, lang, limit)?;
+                if json {
+                    print_json(&hits)?;
+                    return Ok(());
+                }
+                for hit in hits {
+                    println!(
+                        "{}:{}:{}",
+                        hit.path.display(),
+                        hit.line,
+                        first_line(&hit.text)
+                    );
+                }
+                return Ok(());
+            }
             let options = one_grep::rg::Options {
                 regex,
                 case_insensitive,

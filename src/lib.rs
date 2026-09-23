@@ -3,6 +3,7 @@
 //!mirrors zg engine boundary: indexing + retrieval paths behind one API
 //! so CLI and MCP server share behavior.
 
+pub mod astg;
 pub mod chains;
 pub mod embed;
 pub mod engine;

@@ -42,7 +42,7 @@ actually care about.
 | # | Packet | Status | Gate |
 | --- | --- | --- | --- |
 | 4.1 | `og-budget` — MCP returns max N chunks, each truncated, with score, `source=rg\|bm25\|vec`, one-line breadcrumb (JSON without a cap moves the dump, it does not save tokens) | **Done** — every chunk line carries `source=` (`bm25`/`vec`/`bm25+vec` from ranks, `rg` for live hits), crumbs flattened to one line, text capped at 1200 chars; `search_output_respects_chunk_budget` pins count+cap+tags | token-count test on a fixed fixture: capped < uncapped, winners retained |
-| 4.2 | `og-astg-fuse` — do **not** reimplement rewrite rules: shell out to `ast-grep` when present and fuse its hits as a third RRF list. `--lang` stays the only overlap | **Open** | `ast-grep` absent → identical results; present → third list fused, never merged as rewrite |
+| 4.2 | `og-astg-fuse` — do **not** reimplement rewrite rules: shell out to `ast-grep` when present and fuse its hits as a third RRF list. `--lang` stays the only overlap | **Done** — `src/astg.rs` bridge (verified live against ast-grep 0.45.1 JSON schema + lang coverage incl. nix/markdown), `fuse::apply_ast` third RRF list with `ast_rank` tiebreak, opt-in via `rg --structural` / `query --ast` / MCP `rg.structural` + `search ast_pattern/ast_lang`; absent binary fails closed, empty list is a no-op | `ast-grep` absent → identical results; present → third list fused, never merged as rewrite |
 
 ## Must not
 

@@ -40,12 +40,18 @@ pub struct FusedHit {
     pub lexical_rank: Option<usize>,
     /// 1-based vector rank, when present.
     pub vector_rank: Option<usize>,
+    /// 1-based structural (ast-grep) rank, when present.
+    pub ast_rank: Option<usize>,
 }
 
 /// Retrieval source for output budgets: which list(s) produced the hit.
-/// Live-`rg` fallbacks carry neither rank.
+/// Live-`rg` fallbacks carry neither rank. Structural-only hits are "ast";
+/// mixed hits keep their lexical/vector label (the ast term only boosts).
 #[must_use]
 pub fn source(hit: &FusedHit) -> &'static str {
+    if hit.lexical_rank.is_none() && hit.vector_rank.is_none() && hit.ast_rank.is_some() {
+        return "ast";
+    }
     match (hit.lexical_rank, hit.vector_rank) {
         (Some(_), Some(_)) => "bm25+vec",
         (Some(_), None) => "bm25",
@@ -158,6 +164,7 @@ pub fn hybrid(
             score: term,
             lexical_rank,
             vector_rank,
+            ast_rank: None,
         });
     };
 
@@ -196,15 +203,18 @@ pub fn hybrid(
             score: rrf(Some(i + 1)),
             lexical_rank: None,
             vector_rank: Some(i + 1),
+            ast_rank: None,
         });
     }
 
-    // Exact beats fuzzy on ties: lexical rank first, then vector rank.
+    // Exact beats fuzzy on ties: lexical rank first, then vector rank,
+    // then structural rank.
     fused.sort_by(|a, b| {
         b.score
             .total_cmp(&a.score)
             .then_with(|| cmp_rank(a.lexical_rank, b.lexical_rank))
             .then_with(|| cmp_rank(a.vector_rank, b.vector_rank))
+            .then_with(|| cmp_rank(a.ast_rank, b.ast_rank))
     });
 
     if let Some(reranker) = reranker {
@@ -275,6 +285,48 @@ fn overlap(a_start: u64, a_end: u64, b_start: u64, b_end: u64) -> u64 {
     (a_end.min(b_end) + 1).saturating_sub(a_start.max(b_start))
 }
 
+/// Fuse structural (ast-grep) hits as a third RRF list over an existing
+/// shortlist. Each `(path, line)` credits the overlapping fused slot in
+/// the same file (enumeration order is the ast rank); non-overlapping
+/// regions become their own entries. An empty list is a no-op, so absent
+/// ast-grep means bit-identical results.
+///
+/// The caller re-truncates to its limit afterwards.
+pub fn apply_ast(fused: &mut Vec<FusedHit>, ast: &[(PathBuf, u64)]) {
+    for (i, (path, line)) in ast.iter().enumerate() {
+        let rank = i + 1;
+        let slot = fused
+            .iter_mut()
+            .filter(|s| &s.path == path && s.ast_rank.is_none())
+            .max_by_key(|s| overlap(s.start, s.end, *line, *line));
+        if let Some(slot) = slot {
+            if overlap(slot.start, slot.end, *line, *line) > 0 {
+                slot.score += rrf(Some(rank));
+                slot.ast_rank = Some(rank);
+                continue;
+            }
+        }
+        fused.push(FusedHit {
+            path: path.clone(),
+            start: *line,
+            end: *line,
+            breadcrumb: "ast-grep".to_owned(),
+            text: String::new(),
+            score: rrf(Some(rank)),
+            lexical_rank: None,
+            vector_rank: None,
+            ast_rank: Some(rank),
+        });
+    }
+    fused.sort_by(|a, b| {
+        b.score
+            .total_cmp(&a.score)
+            .then_with(|| cmp_rank(a.lexical_rank, b.lexical_rank))
+            .then_with(|| cmp_rank(a.vector_rank, b.vector_rank))
+            .then_with(|| cmp_rank(a.ast_rank, b.ast_rank))
+    });
+}
+
 /// Retrieve a shortlist: live rg when unindexed, hybrid or BM25 otherwise.
 ///
 /// # Errors
@@ -305,6 +357,7 @@ pub fn collect(
             score: f64::from(hit.score),
             lexical_rank: Some(i + 1),
             vector_rank: None,
+            ast_rank: None,
         })
         .collect())
 }
@@ -321,6 +374,7 @@ fn from_rg(hits: Vec<rg::Hit>) -> Vec<FusedHit> {
             // Unranked live hits: no list claims them, so `source` is "rg".
             lexical_rank: None,
             vector_rank: None,
+            ast_rank: None,
         })
         .collect()
 }
@@ -422,6 +476,71 @@ mod tests {
     }
 
     #[test]
+    fn apply_ast_empty_is_noop() {
+        let mut fused = vec![FusedHit {
+            path: std::path::PathBuf::from("/ws/a.rs"),
+            start: 1,
+            end: 10,
+            breadcrumb: "f".to_owned(),
+            text: "body".to_owned(),
+            score: 1.0,
+            lexical_rank: Some(1),
+            vector_rank: None,
+            ast_rank: None,
+        }];
+        let before = fused.clone();
+        apply_ast(&mut fused, &[]);
+        assert_eq!(fused, before);
+    }
+
+    #[test]
+    fn apply_ast_boosts_overlapping_slot_and_adds_new_ones() {
+        let mut fused = vec![
+            FusedHit {
+                path: std::path::PathBuf::from("/ws/a.rs"),
+                start: 1,
+                end: 10,
+                breadcrumb: "f".to_owned(),
+                text: "body".to_owned(),
+                score: 0.01,
+                lexical_rank: Some(2),
+                vector_rank: None,
+                ast_rank: None,
+            },
+            FusedHit {
+                path: std::path::PathBuf::from("/ws/b.rs"),
+                start: 1,
+                end: 5,
+                breadcrumb: "g".to_owned(),
+                text: "other".to_owned(),
+                score: 0.005,
+                lexical_rank: Some(1),
+                vector_rank: None,
+                ast_rank: None,
+            },
+        ];
+        // Line 3 overlaps the a.rs slot: RRF term lifts it above b.rs.
+        // Line 99 matches nothing: becomes its own entry tagged "ast".
+        apply_ast(
+            &mut fused,
+            &[
+                (std::path::PathBuf::from("/ws/a.rs"), 3),
+                (std::path::PathBuf::from("/ws/c.rs"), 99),
+            ],
+        );
+        assert_eq!(fused.len(), 3);
+        assert_eq!(fused[0].path, std::path::PathBuf::from("/ws/a.rs"));
+        assert_eq!(fused[0].ast_rank, Some(1));
+        assert_eq!(source(&fused[0]), "bm25");
+        let added = fused
+            .iter()
+            .find(|h| h.path.ends_with("c.rs"))
+            .expect("added");
+        assert_eq!(source(added), "ast");
+        assert_eq!(added.ast_rank, Some(2));
+    }
+
+    #[test]
     fn fused_hit_serializes_for_json_output() {
         let hit = FusedHit {
             path: std::path::PathBuf::from("/ws/a.rs"),
@@ -432,6 +551,7 @@ mod tests {
             score: 1.5,
             lexical_rank: Some(1),
             vector_rank: None,
+            ast_rank: None,
         };
         let value = serde_json::to_value(&hit).expect("json");
         assert_eq!(value["start"], 3);

@@ -162,8 +162,11 @@ Honest substitutes, depending on which half of one-grep you need:
   (Run 9: 2.1 ms vs 7.2 ms); use `rg` when you know the literal text.
 * **Structural search**: [ast-grep](https://github.com/ast-grep/ast-grep)
   (Rust, tree-sitter) — matches AST shape instead of text
-  (`$A && $A()` patterns, rewrite rules). Complementary: ast-grep for
-  shape, one-grep for intent.
+  (`$A && $A()` patterns, rewrite rules). one-grep does not reimplement
+  this: `rg --structural -p 'pattern' --lang rust` and
+  `query --hybrid --ast 'pattern' --ast-lang rust` shell out to the
+  `ast-grep` binary when present (fused as a third RRF list, tagged
+  `source=ast`) and fail closed when absent.
 * **Hybrid codebase search**: `zg` (`zvec-grep`, Node/TypeScript cousin)
   — same BM25+vector idea, ~250 ms
   per query in our bench vs ~70–200 ms for one-grep hybrid. one-grep is

@@ -130,6 +130,11 @@ struct SearchParams {
     lang: Option<Vec<String>>,
     /// Restrict hits to ignore-style globs (whitelist, `!` negates).
     globs: Option<Vec<String>>,
+    /// Structural pattern fused as a third RRF list (needs `ast_lang` and
+    /// the `ast-grep` binary on PATH). Applies to hybrid retrieval.
+    ast_pattern: Option<String>,
+    /// Language for `ast_pattern` (same vocabulary as `lang`).
+    ast_lang: Option<String>,
     /// Max hits (default 10, max 50).
     limit: Option<usize>,
 }
@@ -157,6 +162,9 @@ struct RgParams {
     pattern: String,
     /// Treat pattern as regex.
     regex: Option<bool>,
+    /// Interpret the pattern structurally via ast-grep (needs exactly one
+    /// `lang`; requires the `ast-grep` binary on PATH).
+    structural: Option<bool>,
     /// Case-insensitive matching.
     case_insensitive: Option<bool>,
     /// Restrict to languages (`rust`, `python`, `typescript`, `go`,
@@ -204,6 +212,7 @@ impl OneGrep {
                         root: p.root.clone(),
                         pattern,
                         regex: Some(false),
+                        structural: None,
                         case_insensitive: Some(false),
                         lang: p.lang.clone(),
                         globs: p.globs.clone(),
@@ -244,27 +253,52 @@ impl OneGrep {
         }
         let indexed = index::is_indexed(&root);
         let fuse = p.fuse.unwrap_or(true);
+        // Structural third list: needs both halves, and a binary behind it.
+        let ast = match (&p.ast_pattern, &p.ast_lang) {
+            (None, None) => None,
+            (Some(pattern), Some(lang)) => {
+                if !crate::astg::available() {
+                    return Err(McpError::invalid_params(
+                        "ast-grep not found on PATH (or ONE_GREP_AST_GREP)",
+                        None,
+                    ));
+                }
+                Some((pattern.clone(), lang.clone()))
+            }
+            _ => {
+                return Err(McpError::invalid_params(
+                    "ast_pattern and ast_lang must be set together",
+                    None,
+                ));
+            }
+        };
         // Did retrieval actually consume vectors? Only then is their
         // staleness worth a note.
         let mut used_vectors = false;
-        let lines: Vec<String> = if !indexed {
-            rg_fallback_lines(&root, &query, limit, &filter)?
+        let mut fused: Vec<fuse::FusedHit> = if !indexed {
+            fuse::collect(&root, &query, limit, false, None).map_err(internal)?
         } else if fuse {
             match provider() {
                 Ok(provider) => {
                     used_vectors = true;
-                    fuse::hybrid(&root, &query, limit, Some(provider), None)
-                        .map_err(internal)?
-                        .iter()
-                        .filter(|h| filter.keep(&h.path))
-                        .map(render_fused)
-                        .collect()
+                    fuse::hybrid(&root, &query, limit, Some(provider), None).map_err(internal)?
                 }
-                Err(_) => lexical(&root, &query, limit, &filter)?,
+                Err(_) => fuse::collect(&root, &query, limit, false, None).map_err(internal)?,
             }
         } else {
-            lexical(&root, &query, limit, &filter)?
+            fuse::collect(&root, &query, limit, false, None).map_err(internal)?
         };
+        if let Some((pattern, lang)) = ast {
+            let found = crate::astg::search(&root, &pattern, &lang, limit).map_err(rg_error)?;
+            let refs: Vec<(PathBuf, u64)> = found.into_iter().map(|h| (h.path, h.line)).collect();
+            fuse::apply_ast(&mut fused, &refs);
+            fused.truncate(limit);
+        }
+        let lines: Vec<String> = fused
+            .iter()
+            .filter(|h| filter.keep(&h.path))
+            .map(render_fused)
+            .collect();
         let body = lines.join("\n---\n");
         let mut notes = Vec::new();
         if indexed && index::is_stale(&root) {
@@ -303,6 +337,7 @@ impl OneGrep {
                     root: p.root.clone(),
                     pattern: pattern.clone(),
                     regex: Some(false),
+                    structural: None,
                     case_insensitive: Some(false),
                     lang: p.lang.clone(),
                     globs: p.globs.clone(),
@@ -313,6 +348,24 @@ impl OneGrep {
         // Single identifiers go lexical even when ranked: the meter rescores
         // a BM25 shortlist instead of paying for vectors.
         let lexical_only = matches!(cls, route::Route::Identifier(_));
+        let ast = match (&p.ast_pattern, &p.ast_lang) {
+            (None, None) => None,
+            (Some(pattern), Some(lang)) => {
+                if !crate::astg::available() {
+                    return Err(McpError::invalid_params(
+                        "ast-grep not found on PATH (or ONE_GREP_AST_GREP)",
+                        None,
+                    ));
+                }
+                Some((pattern.clone(), lang.clone()))
+            }
+            _ => {
+                return Err(McpError::invalid_params(
+                    "ast_pattern and ast_lang must be set together",
+                    None,
+                ));
+            }
+        };
         let mut query = p.query.clone();
         if let Some(fts) = &p.fts {
             query.push(' ');
@@ -336,6 +389,13 @@ impl OneGrep {
             } else {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
             }?;
+            if let Some((pattern, lang)) = &ast {
+                let found = crate::astg::search(&root_for_rank, pattern, lang, limit)?;
+                let refs: Vec<(PathBuf, u64)> =
+                    found.into_iter().map(|h| (h.path, h.line)).collect();
+                fuse::apply_ast(&mut hits, &refs);
+                hits.truncate(limit);
+            }
             // Filter before the meter: Jev scores winners only, and
             // `limit` bounds what the caller ever sees.
             hits.retain(|h| filter.keep(&h.path));
@@ -418,10 +478,47 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, nix, markdown); `globs` are include globs (`!` negates)."
+        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, typescript, go, java, nix, markdown); `globs` are include globs (`!` negates). `structural` runs the pattern through ast-grep instead (needs exactly one `lang`)."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
+        if p.structural.unwrap_or(false) {
+            if p.regex.unwrap_or(false) {
+                return Err(McpError::invalid_params(
+                    "`structural` and `regex` cannot be combined",
+                    None,
+                ));
+            }
+            let langs = p.lang.clone().unwrap_or_default();
+            let [lang] = langs.as_slice() else {
+                return Err(McpError::invalid_params(
+                    "`structural` needs exactly one `lang`",
+                    None,
+                ));
+            };
+            if !crate::astg::available() {
+                return Err(McpError::invalid_params(
+                    "ast-grep not found on PATH (or ONE_GREP_AST_GREP)",
+                    None,
+                ));
+            }
+            let limit = p.limit.unwrap_or(100).clamp(1, 500);
+            let lines: Vec<String> = crate::astg::search(&root, &p.pattern, lang, limit)
+                .map_err(rg_error)?
+                .iter()
+                .map(|h| {
+                    format!(
+                        "{}:{}:{}",
+                        h.path.display(),
+                        h.line,
+                        h.text.lines().next().unwrap_or("")
+                    )
+                })
+                .collect();
+            return Ok(CallToolResult::success(vec![ContentBlock::text(
+                lines.join("\n"),
+            )]));
+        }
         let options = rg::Options {
             regex: p.regex.unwrap_or(false),
             case_insensitive: p.case_insensitive.unwrap_or(false),
@@ -636,6 +733,8 @@ mod tests {
                     fuse: Some(false),
                     lang: None,
                     globs: None,
+                    ast_pattern: None,
+                    ast_lang: None,
                     limit: None,
                 })))
                 .expect("search");
@@ -666,6 +765,8 @@ mod tests {
                     fuse: Some(false),
                     lang: None,
                     globs: None,
+                    ast_pattern: None,
+                    ast_lang: None,
                     limit: None,
                 }))
                 .await
@@ -688,6 +789,8 @@ mod tests {
                 fuse: Some(false),
                 lang: None,
                 globs: None,
+                ast_pattern: None,
+                ast_lang: None,
                 limit: Some(5),
             }))
             .await
@@ -780,6 +883,8 @@ mod tests {
                     fuse: Some(false),
                     lang: None,
                     globs: None,
+                    ast_pattern: None,
+                    ast_lang: None,
                     limit: None,
                 }))
                 .await
@@ -833,6 +938,7 @@ mod tests {
                 root: workspace.path().to_string_lossy().into_owned(),
                 pattern: "needle".into(),
                 regex: None,
+                structural: None,
                 case_insensitive: None,
                 lang: Some(vec!["rust".into()]),
                 globs: None,
@@ -850,6 +956,7 @@ mod tests {
                 root: workspace.path().to_string_lossy().into_owned(),
                 pattern: "needle".into(),
                 regex: None,
+                structural: None,
                 case_insensitive: None,
                 lang: Some(vec!["cobol".into()]),
                 globs: None,
@@ -897,6 +1004,8 @@ mod tests {
                 fuse: Some(false),
                 lang: None,
                 globs: None,
+                ast_pattern: None,
+                ast_lang: None,
                 limit: Some(5),
             }))
             .await
@@ -946,6 +1055,8 @@ mod tests {
                 fuse: Some(false),
                 lang: Some(vec!["rust".into()]),
                 globs: None,
+                ast_pattern: None,
+                ast_lang: None,
                 limit: None,
             }))
             .await
@@ -962,6 +1073,8 @@ mod tests {
                 fuse: Some(false),
                 lang: Some(vec!["cobol".into()]),
                 globs: None,
+                ast_pattern: None,
+                ast_lang: None,
                 limit: None,
             }))
             .await
@@ -991,6 +1104,8 @@ mod tests {
                 fuse: Some(false),
                 lang: None,
                 globs: None,
+                ast_pattern: None,
+                ast_lang: None,
                 limit: Some(3),
             }))
             .await
@@ -1009,5 +1124,121 @@ mod tests {
             );
             assert!(text.chars().count() <= TEXT_CAP, "cap blown: {header}");
         }
+    }
+
+    /// Fake `ast-grep` binary printing `stdout` for any invocation.
+    fn fake_ast_grep(bin: &Path, stdout: &str) {
+        let script = bin.join("ast-grep");
+        std::fs::write(&script, format!("#!/bin/sh\nprintf '%s' '{stdout}'\n")).expect("script");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod");
+        }
+        // SAFETY: under `env_lock`; restored by the caller.
+        unsafe {
+            std::env::set_var(crate::astg::ENV_BIN, script.to_string_lossy().into_owned());
+        }
+    }
+
+    fn unpoint_ast_grep() {
+        // SAFETY: under `env_lock`; restores ambient state.
+        unsafe {
+            std::env::remove_var(crate::astg::ENV_BIN);
+        }
+    }
+
+    #[tokio::test]
+    async fn rg_structural_uses_ast_grep_when_present() {
+        let _guard = crate::astg::tests::env_lock();
+        let bin = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.rs"), "fn apply() {}\n").expect("fixture");
+        let file = workspace.path().join("a.rs").to_string_lossy().into_owned();
+        fake_ast_grep(
+            bin.path(),
+            &format!(
+                r#"[{{"file": "{file}", "range": {{"start": {{"line": 0}}}}, "text": "fn apply() {{}}"}}]"#
+            ),
+        );
+        let result = OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                pattern: "fn $F".into(),
+                regex: None,
+                structural: Some(true),
+                case_insensitive: None,
+                lang: Some(vec!["rust".into()]),
+                globs: None,
+                limit: None,
+            }))
+            .await
+            .expect("structural rg");
+        unpoint_ast_grep();
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("a.rs:1:fn apply()"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn search_ast_pattern_fuses_third_list() {
+        let _guard = crate::astg::tests::env_lock();
+        let bin = tempfile::tempdir().expect("tempdir");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("a.rs"),
+            "fn apply() {}\n// structural needle prose here\n",
+        )
+        .expect("fixture");
+        crate::index::sync(workspace.path()).expect("sync");
+        let file = workspace.path().join("a.rs").to_string_lossy().into_owned();
+        fake_ast_grep(
+            bin.path(),
+            &format!(
+                r#"[{{"file": "{file}", "range": {{"start": {{"line": 0}}}}, "text": "fn apply() {{}}"}}]"#
+            ),
+        );
+        let root = workspace.path().to_string_lossy().into_owned();
+        let result = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root: root.clone(),
+                query: "structural needle prose documentation".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: None,
+                globs: None,
+                ast_pattern: Some("fn $F".into()),
+                ast_lang: Some("rust".into()),
+                limit: None,
+            }))
+            .await
+            .expect("search");
+        unpoint_ast_grep();
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("a.rs"), "{body}");
+        // No binary, explicit pattern: fail closed, not silent skip.
+        // Point at a missing binary (not unpoint) so the test holds even
+        // where a real ast-grep is installed.
+        unsafe {
+            std::env::set_var(crate::astg::ENV_BIN, "/no/such/ast-grep-binary");
+        }
+        let err = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root,
+                query: "structural needle prose documentation".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: None,
+                globs: None,
+                ast_pattern: Some("fn $F".into()),
+                ast_lang: Some("rust".into()),
+                limit: None,
+            }))
+            .await
+            .expect_err("absent ast-grep must fail");
+        unpoint_ast_grep();
+        assert!(err.message.contains("ast-grep"), "{err:?}");
     }
 }
