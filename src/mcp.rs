@@ -43,8 +43,13 @@ fn check_root(root: &str) -> Result<PathBuf, McpError> {
 
 fn exact_pattern(query: &str) -> Option<&str> {
     let query = query.trim();
-    if let Some(literal) = query.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-        return (!literal.trim().is_empty() && !literal.contains('"')).then_some(literal);
+    for quote in ['"', '\''] {
+        if let Some(literal) = query
+            .strip_prefix(quote)
+            .and_then(|s| s.strip_suffix(quote))
+        {
+            return (!literal.trim().is_empty() && !literal.contains(quote)).then_some(literal);
+        }
     }
     let identifier = |part: &str| {
         let mut chars = part.chars();
@@ -145,7 +150,8 @@ struct DefinitionParams {
 struct RgParams {
     /// Absolute workspace root.
     root: String,
-    /// Pattern text (literal unless `regex`).
+    /// Pattern text (literal unless `regex`). Pass raw text without shell
+    /// quotes; one outer `"..."` / `'...'` pair is ignored.
     pattern: String,
     /// Treat pattern as regex.
     regex: Option<bool>,
@@ -173,7 +179,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and double-quoted literals use exact rg lookup unless fts anchors are supplied. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
     )]
     async fn search(
         &self,
@@ -355,7 +361,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits."
+        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
@@ -493,6 +499,8 @@ mod tests {
             " foo::Bar ",
             "\"x:Name\"",
             "\"{Binding User.Name}\"",
+            "'x:Name'",
+            "'comment lies'",
         ] {
             assert!(exact_pattern(query).is_some(), "{query}");
         }
@@ -506,7 +514,9 @@ mod tests {
             "https://example.com",
             "\"\"",
             "\"   \"",
+            "''",
             "\"foo\" OR \"bar\"",
+            "'foo' OR 'bar'",
             "Bar",
         ] {
             assert_eq!(exact_pattern(query), None, "{query}");

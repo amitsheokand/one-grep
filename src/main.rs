@@ -48,7 +48,7 @@ enum Command {
     DumpChunks { path: std::path::PathBuf },
     /// Search workspace files directly (no index needed).
     Rg {
-        /// Pattern to search for.
+        /// Pattern to search for (raw text; one outer "..." / '...' pair is ignored).
         pattern: String,
         /// Workspace root to search.
         #[arg(default_value = ".")]

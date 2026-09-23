@@ -96,6 +96,33 @@ fn identifier_like(term: &str) -> bool {
         .any(|c| matches!(c, b'-' | b'_' | b'/' | b'.') || c.is_ascii_uppercase())
 }
 
+/// Strip one layer of shell-style surrounding quotes (`"..."` or `'...'`).
+///
+/// Agents often copy a shell-quoted pattern (`one-grep rg "foo bar" .`) into
+/// the MCP `rg` JSON field, where no shell runs. Without this, the literal
+/// search looks for the quote characters themselves and returns zero hits,
+/// which reads as "MCP regex fails on quoted patterns". Stripping here makes
+/// CLI and MCP agree: pass raw text, surrounding quotes are ignored.
+///
+/// Returns the original string when there is no clean outer pair (empty
+/// inner text, or the inner text still contains the same quote char, e.g. a
+/// real quoted-string search like `"foo" OR "bar"`).
+#[must_use]
+pub fn normalize_pattern(pattern: &str) -> &str {
+    let trimmed = pattern.trim();
+    if trimmed.len() >= 2 {
+        let bytes = trimmed.as_bytes();
+        let (first, last) = (bytes[0], bytes[bytes.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            let inner = &trimmed[1..trimmed.len() - 1];
+            if !inner.trim().is_empty() && !inner.contains(first as char) {
+                return inner;
+            }
+        }
+    }
+    trimmed
+}
+
 fn regex_escape(term: &str) -> String {
     let mut out = String::with_capacity(term.len());
     for c in term.chars() {
@@ -146,6 +173,10 @@ pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Ve
 
 /// Search `workspace` for `pattern`, returning up to `options.limit` hits.
 ///
+/// Surrounding shell-style quotes are ignored via [`normalize_pattern`], so
+/// `"foo bar"` and `foo bar` agree between CLI and MCP. An empty pattern
+/// after normalization returns no hits instead of matching every line.
+///
 /// # Errors
 ///
 /// Returns [`Error`] when the pattern fails to compile, the workspace
@@ -157,10 +188,14 @@ pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<
             workspace.display()
         )));
     }
+    let effective = normalize_pattern(pattern);
+    if effective.is_empty() {
+        return Ok(Vec::new());
+    }
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(options.case_insensitive)
         .fixed_strings(!options.regex)
-        .build(pattern)?;
+        .build(effective)?;
 
     let mut builder = WalkBuilder::new(workspace);
     builder
@@ -318,5 +353,38 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, dir.path().join("notes.txt"));
         assert!(unindexed_note(dir.path()).contains("Indexing is available"));
+    }
+
+    #[test]
+    fn normalize_strips_one_outer_quote_pair() {
+        assert_eq!(normalize_pattern("\"foo bar\""), "foo bar");
+        assert_eq!(normalize_pattern("'foo bar'"), "foo bar");
+        assert_eq!(normalize_pattern("  \"foo bar\"  "), "foo bar");
+        assert_eq!(normalize_pattern("foo bar"), "foo bar");
+        // Ambiguous / empty: keep original (trimmed) so we never match-all.
+        assert_eq!(normalize_pattern("\"\""), "\"\"");
+        assert_eq!(normalize_pattern("\"   \""), "\"   \"");
+        assert_eq!(
+            normalize_pattern("\"foo\" OR \"bar\""),
+            "\"foo\" OR \"bar\""
+        );
+    }
+
+    #[test]
+    fn quoted_literal_finds_same_hits_as_raw() {
+        let dir = workspace_with(&[("a.txt", "comment lies here\n")]);
+        for pattern in ["comment lies", "\"comment lies\"", "'comment lies'"] {
+            let hits = search(dir.path(), pattern, &Options::default()).expect("search");
+            assert_eq!(hits.len(), 1, "{pattern}");
+        }
+    }
+
+    #[test]
+    fn empty_after_normalize_returns_no_hits() {
+        let dir = workspace_with(&[("a.txt", "anything\n")]);
+        for pattern in ["", "   ", "\"\""] {
+            let hits = search(dir.path(), pattern, &Options::default()).expect("search");
+            assert!(hits.is_empty(), "{pattern}");
+        }
     }
 }
