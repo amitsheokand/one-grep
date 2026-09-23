@@ -29,7 +29,7 @@ const WRITER_HEAP: usize = 50_000_000;
 const MANIFEST: &str = "manifest.json";
 
 /// One ranked chunk hit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RankedHit {
     /// Absolute file path.
     pub path: PathBuf,

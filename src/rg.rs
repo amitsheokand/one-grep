@@ -4,17 +4,19 @@
 //! carry file-oriented locations for terminal reading or agent context.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use grep::{
     regex::RegexMatcherBuilder,
     searcher::{BinaryDetection, SearcherBuilder, Sink, SinkMatch},
 };
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
+use serde::Serialize;
 
 use crate::{Error, engine};
 
 /// One matching line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Hit {
     /// File containing the match.
     pub path: PathBuf,
@@ -33,6 +35,9 @@ pub struct Options {
     pub case_insensitive: bool,
     /// Extra ignore-style globs (e.g. `["!target/*"]`).
     pub globs: Vec<String>,
+    /// Language filter (`rust`, `python`, `nix`, `markdown`, or an
+    /// extension like `rs`). Empty means all files.
+    pub langs: Vec<String>,
     /// Maximum hits to collect.
     pub limit: usize,
 }
@@ -43,9 +48,50 @@ impl Default for Options {
             regex: false,
             case_insensitive: false,
             globs: Vec::new(),
+            langs: Vec::new(),
             limit: 100,
         }
     }
+}
+
+/// Languages accepted by [`Options::langs`].
+pub const SUPPORTED_LANGS: &[&str] = &["rust", "python", "nix", "markdown"];
+
+/// Map a `--lang` value to file extensions, à la `ast-grep --lang`.
+/// Accepts canonical names and bare extensions (`rs`, `py`, `md`).
+#[must_use]
+pub fn lang_extensions(lang: &str) -> Option<&'static [&'static str]> {
+    match lang.trim().to_ascii_lowercase().as_str() {
+        "rust" | "rs" => Some(&["rs"]),
+        "python" | "py" => Some(&["py"]),
+        "nix" => Some(&["nix"]),
+        "markdown" | "md" => Some(&["md", "markdown"]),
+        _ => None,
+    }
+}
+
+/// Resolve [`Options::langs`] to an extension set, or fail closed naming
+/// what is supported. Unknown languages are caller errors, never silent
+/// match-nothings.
+fn resolve_lang_exts(langs: &[String]) -> Result<Option<Vec<String>>, Error> {
+    if langs.is_empty() {
+        return Ok(None);
+    }
+    let mut exts = Vec::new();
+    for lang in langs {
+        match lang_extensions(lang) {
+            Some(list) => exts.extend(list.iter().map(ToString::to_string)),
+            None => {
+                return Err(Error::InvalidInput(format!(
+                    "unknown --lang `{lang}` (supported: {})",
+                    SUPPORTED_LANGS.join(", ")
+                )));
+            }
+        }
+    }
+    exts.sort();
+    exts.dedup();
+    Ok(Some(exts))
 }
 
 /// Stopwords dropped when turning an NL query into live-grep terms.
@@ -166,6 +212,7 @@ pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Ve
             regex,
             case_insensitive: true,
             globs: Vec::new(),
+            langs: Vec::new(),
             limit,
         },
     )
@@ -173,14 +220,17 @@ pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Ve
 
 /// Search `workspace` for `pattern`, returning up to `options.limit` hits.
 ///
-/// Surrounding shell-style quotes are ignored via [`normalize_pattern`], so
-/// `"foo bar"` and `foo bar` agree between CLI and MCP. An empty pattern
-/// after normalization returns no hits instead of matching every line.
+/// The walk runs on all cores (`ignore` parallel walker); hits are sorted
+/// by `(path, line)` and truncated, so output is deterministic across runs.
+/// `limit` caps output lines, not files scanned. Surrounding shell-style
+/// quotes are ignored via [`normalize_pattern`], so `"foo bar"` and
+/// `foo bar` agree between CLI and MCP. An empty pattern after
+/// normalization returns no hits instead of matching every line.
 ///
 /// # Errors
 ///
-/// Returns [`Error`] when the pattern fails to compile, the workspace
-/// cannot be walked, or a file cannot be searched.
+/// Returns [`Error`] when the pattern fails to compile, a `--lang` is
+/// unknown, the workspace cannot be walked, or a file cannot be searched.
 pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<Hit>, Error> {
     if !workspace.is_dir() {
         return Err(Error::InvalidInput(format!(
@@ -192,6 +242,7 @@ pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<
     if effective.is_empty() {
         return Ok(Vec::new());
     }
+    let lang_exts = resolve_lang_exts(&options.langs)?;
     let matcher = RegexMatcherBuilder::new()
         .case_insensitive(options.case_insensitive)
         .fixed_strings(!options.regex)
@@ -210,37 +261,60 @@ pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<
         }
         builder.overrides(overrides.build()?);
     }
-    let mut hits = Vec::new();
-    for entry in builder.build().filter_map(Result::ok) {
-        if hits.len() >= options.limit {
-            break;
-        }
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
+    let limit = options.limit;
+    let hits = Mutex::new(Vec::<Hit>::new());
+    builder.build_parallel().run(|| {
+        let matcher = &matcher;
+        let hits = &hits;
+        let lang_exts = &lang_exts;
         let mut searcher = SearcherBuilder::new()
             .line_number(true)
             .binary_detection(BinaryDetection::quit(b'\x00'))
             .build();
-        let mut sink = HitSink {
-            path: path.to_path_buf(),
-            hits: &mut hits,
-            limit: options.limit,
-        };
-        // Skip unreadable files instead of failing the whole search.
-        let _ = searcher.search_path(&matcher, path, &mut sink);
-    }
+        Box::new(move |entry: Result<ignore::DirEntry, ignore::Error>| {
+            let Ok(path) = entry.map(|e| e.path().to_path_buf()) else {
+                return WalkState::Continue;
+            };
+            if !path.is_file() {
+                return WalkState::Continue;
+            }
+            if let Some(exts) = lang_exts {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !exts.iter().any(|e| *e == ext) {
+                    return WalkState::Continue;
+                }
+            }
+            // Skip unreadable files instead of failing the whole search.
+            let mut sink = VecSink {
+                path: path.clone(),
+                out: Vec::new(),
+            };
+            if searcher.search_path(matcher, &path, &mut sink).is_err() {
+                return WalkState::Continue;
+            }
+            if !sink.out.is_empty() {
+                hits.lock().expect("hits mutex").extend(sink.out);
+            }
+            WalkState::Continue
+        })
+    });
+    let mut hits = hits.into_inner().expect("hits mutex");
+    hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+    hits.truncate(limit);
     Ok(hits)
 }
 
-struct HitSink<'h> {
+/// Per-file sink used by the parallel walker (merged under a mutex after).
+struct VecSink {
     path: PathBuf,
-    hits: &'h mut Vec<Hit>,
-    limit: usize,
+    out: Vec<Hit>,
 }
 
-impl Sink for HitSink<'_> {
+impl Sink for VecSink {
     type Error = std::io::Error;
 
     fn matched(
@@ -248,16 +322,13 @@ impl Sink for HitSink<'_> {
         _searcher: &grep::searcher::Searcher,
         mat: &SinkMatch<'_>,
     ) -> Result<bool, std::io::Error> {
-        if self.hits.len() >= self.limit {
-            return Ok(false);
-        }
         let text = String::from_utf8_lossy(mat.bytes());
-        self.hits.push(Hit {
+        self.out.push(Hit {
             path: self.path.clone(),
             line: mat.line_number().unwrap_or(0),
             text: text.trim_end_matches(['\r', '\n']).to_owned(),
         });
-        Ok(self.hits.len() < self.limit)
+        Ok(true)
     }
 }
 
@@ -406,5 +477,66 @@ mod tests {
             let once = normalize_pattern(pattern);
             assert_eq!(normalize_pattern(once), once, "{pattern}");
         }
+    }
+
+    #[test]
+    fn lang_filter_restricts_to_extensions() {
+        let dir = workspace_with(&[
+            ("main.rs", "needle here\n"),
+            ("notes.txt", "needle here\n"),
+            ("app.py", "needle here\n"),
+        ]);
+        let rust_only = Options {
+            langs: vec!["rust".to_owned()],
+            ..Options::default()
+        };
+        let hits = search(dir.path(), "needle", &rust_only).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, dir.path().join("main.rs"));
+        // Extension aliases agree with canonical names.
+        let alias = Options {
+            langs: vec!["rs".to_owned(), "py".to_owned()],
+            ..Options::default()
+        };
+        let hits = search(dir.path(), "needle", &alias).expect("search");
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[test]
+    fn unknown_lang_fails_closed() {
+        let dir = workspace_with(&[("a.rs", "x\n")]);
+        let options = Options {
+            langs: vec!["cobol".to_owned()],
+            ..Options::default()
+        };
+        let err = search(dir.path(), "x", &options).expect_err("must fail");
+        assert!(matches!(err, Error::InvalidInput(_)));
+        assert!(err.to_string().contains("rust"));
+    }
+
+    #[test]
+    fn parallel_search_is_sorted_and_deterministic() {
+        let dir = workspace_with(&[
+            ("b.txt", "same\nsame\n"),
+            ("a.txt", "same\n"),
+            ("sub/c.txt", "same\n"),
+        ]);
+        let first = search(dir.path(), "same", &Options::default()).expect("search");
+        assert_eq!(first.len(), 4);
+        let mut sorted = first.clone();
+        sorted.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
+        assert_eq!(first, sorted);
+        let second = search(dir.path(), "same", &Options::default()).expect("search");
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn hit_serializes_with_path_line_text() {
+        let dir = workspace_with(&[("a.txt", "hello\n")]);
+        let hits = search(dir.path(), "hello", &Options::default()).expect("search");
+        let value = serde_json::to_value(&hits).expect("json");
+        assert_eq!(value[0]["line"], 1);
+        assert_eq!(value[0]["text"], "hello");
+        assert!(value[0]["path"].as_str().unwrap().ends_with("a.txt"));
     }
 }

@@ -65,6 +65,16 @@ fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
+/// Caller errors (unknown `--lang`, bad glob) are `invalid_params`; engine
+/// failures stay `internal_error`. Fails closed either way.
+fn rg_error(e: crate::Error) -> McpError {
+    match e {
+        crate::Error::InvalidInput(msg) => McpError::invalid_params(msg, None),
+        crate::Error::BadPattern(e) => McpError::invalid_params(format!("bad pattern: {e}"), None),
+        other => internal(other),
+    }
+}
+
 /// Resolve a relative-or-absolute file against the workspace root,
 /// rejecting lexical escapes. Existence is checked by the caller.
 fn resolve_in_root(root: &Path, raw: &str) -> Option<PathBuf> {
@@ -157,6 +167,11 @@ struct RgParams {
     regex: Option<bool>,
     /// Case-insensitive matching.
     case_insensitive: Option<bool>,
+    /// Restrict to languages (`rust`, `python`, `nix`, `markdown`, or
+    /// extensions like `rs`). Unknown values are rejected.
+    lang: Option<Vec<String>>,
+    /// Restrict to ignore-style globs (whitelist, `!` negates).
+    globs: Option<Vec<String>>,
     /// Max hits (default 100, max 500).
     limit: Option<usize>,
 }
@@ -195,6 +210,8 @@ impl OneGrep {
                         pattern: pattern.to_owned(),
                         regex: Some(false),
                         case_insensitive: Some(false),
+                        lang: None,
+                        globs: None,
                         limit: Some(limit),
                     }))
                     .await;
@@ -256,6 +273,8 @@ impl OneGrep {
                         pattern: pattern.to_owned(),
                         regex: Some(false),
                         case_insensitive: Some(false),
+                        lang: None,
+                        globs: None,
                         limit: Some(limit),
                     }))
                     .await;
@@ -361,18 +380,19 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true."
+        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, nix, markdown); `globs` are include globs (`!` negates)."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let options = rg::Options {
             regex: p.regex.unwrap_or(false),
             case_insensitive: p.case_insensitive.unwrap_or(false),
-            globs: Vec::new(),
+            globs: p.globs.unwrap_or_default(),
+            langs: p.lang.unwrap_or_default(),
             limit: p.limit.unwrap_or(100).clamp(1, 500),
         };
         let lines: Vec<String> = rg::search(&root, &p.pattern, &options)
-            .map_err(internal)?
+            .map_err(rg_error)?
             .iter()
             .map(|h| format!("{}:{}:{}", h.path.display(), h.line, h.text))
             .collect();
@@ -680,5 +700,50 @@ mod tests {
             let resolved = resolve_in_root(root, raw).expect("inside");
             assert!(resolved.starts_with(root), "{raw}");
         }
+    }
+
+    #[test]
+    fn rg_error_maps_caller_mistakes_to_invalid_params() {
+        let err = rg_error(crate::Error::InvalidInput("unknown --lang `cobol`".into()));
+        assert!(err.message.contains("cobol"));
+        let err = rg_error(crate::Error::InvalidInput("x".into()));
+        assert!(err.message.contains('x'));
+    }
+
+    #[tokio::test]
+    async fn rg_lang_filter_reaches_the_handler() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("main.rs"), "needle\n").expect("fixture");
+        std::fs::write(workspace.path().join("notes.txt"), "needle\n").expect("fixture");
+        let result = OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                pattern: "needle".into(),
+                regex: None,
+                case_insensitive: None,
+                lang: Some(vec!["rust".into()]),
+                globs: None,
+                limit: None,
+            }))
+            .await
+            .expect("rg");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("main.rs"), "{body}");
+        assert!(!body.contains("notes.txt"), "{body}");
+        // Unknown language fails closed as invalid params, not empty output.
+        let err = OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                pattern: "needle".into(),
+                regex: None,
+                case_insensitive: None,
+                lang: Some(vec!["cobol".into()]),
+                globs: None,
+                limit: None,
+            }))
+            .await
+            .expect_err("unknown lang must fail");
+        assert!(err.message.contains("cobol"), "{err:?}");
     }
 }

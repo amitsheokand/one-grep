@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::{
     Error,
     embed::{EmbedProvider, Rerank},
@@ -20,7 +22,7 @@ const LEXICAL_WEIGHT: f64 = 2.0;
 const RERANK_DEPTH: usize = 20;
 
 /// One fused hit.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FusedHit {
     /// Absolute file path.
     pub path: PathBuf,
@@ -403,5 +405,23 @@ mod tests {
         assert_eq!(hits.len(), 1);
         // Reversed: the reranked head is the plain tail.
         assert_eq!(hits[0].path, plain[1].path);
+    }
+
+    #[test]
+    fn fused_hit_serializes_for_json_output() {
+        let hit = FusedHit {
+            path: std::path::PathBuf::from("/ws/a.rs"),
+            start: 3,
+            end: 9,
+            breadcrumb: "m > f".to_owned(),
+            text: "body".to_owned(),
+            score: 1.5,
+            lexical_rank: Some(1),
+            vector_rank: None,
+        };
+        let value = serde_json::to_value(&hit).expect("json");
+        assert_eq!(value["start"], 3);
+        assert_eq!(value["breadcrumb"], "m > f");
+        assert_eq!(value["score"], 1.5);
     }
 }

@@ -45,6 +45,9 @@ enum Command {
         /// Rank the retrieval shortlist inside the tool.
         #[arg(long, value_enum)]
         rank: Option<RankBackend>,
+        /// Emit hits as a JSON array instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
     /// Embed workspace chunks for hybrid search.
     Embed {
@@ -70,9 +73,20 @@ enum Command {
         /// Case-insensitive matching.
         #[arg(long)]
         case_insensitive: bool,
+        /// Restrict to languages (`rust`, `python`, `nix`, `markdown`,
+        /// or extensions like `rs`). Repeatable.
+        #[arg(long)]
+        lang: Vec<String>,
+        /// Restrict to ignore-style globs (whitelist, `!` negates).
+        /// Repeatable.
+        #[arg(long)]
+        glob: Vec<String>,
         /// Maximum hits to print.
         #[arg(long, default_value_t = 100)]
         limit: usize,
+        /// Emit hits as a JSON array instead of `path:line:text` lines.
+        #[arg(long)]
+        json: bool,
     },
     /// Serve the MCP server.
     Serve {
@@ -95,6 +109,12 @@ enum Command {
         #[arg(long, default_value_t = one_grep::install::DEFAULT_PORT)]
         port: u16,
     },
+}
+
+/// Print a value as a JSON array for `--json` machine output.
+fn print_json(value: &impl serde::Serialize) -> Result<()> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
 }
 
 #[tokio::main]
@@ -122,6 +142,7 @@ async fn main() -> Result<()> {
             hybrid,
             rerank,
             rank,
+            json,
         } => {
             // `--rerank` and `--rank` conflict at parse time, so this match
             // is exhaustive: illegal combos are unwired, not runtime errors.
@@ -152,6 +173,14 @@ async fn main() -> Result<()> {
                     one_grep::jev::rerank_hits(&q, hits)
                 })
                 .await?;
+                if json {
+                    eprintln!("{}", status.note);
+                    if !indexed {
+                        eprintln!("{}", one_grep::rg::unindexed_note(&path));
+                    }
+                    print_json(&hits)?;
+                    return Ok(());
+                }
                 println!("{}", status.note);
                 if !indexed {
                     println!("{}", one_grep::rg::unindexed_note(&path));
@@ -170,8 +199,14 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             if !indexed {
+                let hits = one_grep::rg::fallback_search(&path, &query, limit)?;
+                if json {
+                    eprintln!("{}", one_grep::rg::unindexed_note(&path));
+                    print_json(&hits)?;
+                    return Ok(());
+                }
                 println!("{}", one_grep::rg::unindexed_note(&path));
-                for hit in one_grep::rg::fallback_search(&path, &query, limit)? {
+                for hit in hits {
                     println!(
                         "{}:{}-{} [rg-fallback] (live)\n{}",
                         hit.path.display(),
@@ -192,13 +227,18 @@ async fn main() -> Result<()> {
                 let reranker = rank_jina
                     .then(one_grep::embed::JinaReranker::load)
                     .transpose()?;
-                for hit in one_grep::fuse::hybrid(
+                let hits = one_grep::fuse::hybrid(
                     &path,
                     &query,
                     limit,
                     Some(&provider),
                     reranker.as_ref().map(|r| r as &dyn one_grep::embed::Rerank),
-                )? {
+                )?;
+                if json {
+                    print_json(&hits)?;
+                    return Ok(());
+                }
+                for hit in hits {
                     println!(
                         "{}:{}-{} [{}] ({:.4})\n{}",
                         hit.path.display(),
@@ -211,7 +251,12 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            for hit in one_grep::index::search(&path, &query, limit)? {
+            let hits = one_grep::index::search(&path, &query, limit)?;
+            if json {
+                print_json(&hits)?;
+                return Ok(());
+            }
+            for hit in hits {
                 println!(
                     "{}:{}-{} [{}] ({:.2})\n{}",
                     hit.path.display(),
@@ -274,15 +319,24 @@ async fn main() -> Result<()> {
             path,
             regex,
             case_insensitive,
+            lang,
+            glob,
             limit,
+            json,
         } => {
             let options = one_grep::rg::Options {
                 regex,
                 case_insensitive,
-                globs: Vec::new(),
+                globs: glob,
+                langs: lang,
                 limit,
             };
-            for hit in one_grep::rg::search(&path, &pattern, &options)? {
+            let hits = one_grep::rg::search(&path, &pattern, &options)?;
+            if json {
+                print_json(&hits)?;
+                return Ok(());
+            }
+            for hit in hits {
                 println!("{}:{}:{}", hit.path.display(), hit.line, hit.text);
             }
         }
