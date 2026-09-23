@@ -13,12 +13,14 @@ Crate/binary name: **`one-grep`**. License: Apache-2.0. MSRV: Rust 1.85.
   over files, walked on all cores with deterministic `(path, line)` order.
   Literal by default; one outer `"..."` / `'...'` pair is stripped so
   shell and MCP callers agree. `--lang` restricts to
-  `rust`/`python`/`nix`/`markdown` (ast-grep-style); `--glob` adds
+  `rust`/`python`/`typescript`/`go`/`java`/`nix`/`markdown`
+  (ast-grep-style); `--glob` adds
   include globs (`!` negates). `--json` emits a `[{path,line,text}]`
   array. Limit 1–500, default 100.
 * **Indexed lexical search** (`index` + `query`): tree-sitter chunking
-  (Rust/Python/Nix symbols, Markdown sections, sliding windows, 2-hop
-  call-chains) into a tantivy BM25 index under `<workspace>/.one-grep/`.
+  (Rust/Python/TypeScript/Go/Java/Nix symbols, Markdown sections, sliding
+  windows, 2-hop call-chains) into a tantivy BM25 index under
+  `<workspace>/.one-grep/`.
   Lexical window is 150 lines / 135 step; vector window is 50 / 40.
 * **Hybrid retrieval** (`--hybrid`): MiniLM-class ONNX embeddings run
   in-process via fastembed, fused with BM25 by RRF (fetch depth 50/side,
@@ -81,7 +83,7 @@ cargo build --release
 ./target/release/one-grep embed <path> [--model minilm|arctic-m|gemma-300m|<dir>]
 ./target/release/one-grep query "where is auth handled?" --path <path> [--limit 10] [--hybrid] [--rerank] [--rank jev|jina] [--json]
 # `search` is an alias of `query`
-./target/release/one-grep rg "pattern" <path> [--regex] [--case-insensitive] [--lang rust|python|nix|markdown] [--glob '*.rs'] [--limit 100] [--json]
+./target/release/one-grep rg "pattern" <path> [--regex] [--case-insensitive] [--lang rust|python|typescript|go|java|nix|markdown] [--glob '*.rs'] [--limit 100] [--json]
 ./target/release/one-grep watch <path>
 ./target/release/one-grep dump-chunks <path>
 ./target/release/one-grep serve --stdio        # or HTTP on 127.0.0.1:3210

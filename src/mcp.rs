@@ -118,7 +118,8 @@ struct SearchParams {
     fts: Option<Vec<String>>,
     /// Fuse vector similarity with BM25 (default true).
     fuse: Option<bool>,
-    /// Restrict hits to languages (`rust`, `python`, `nix`, `markdown`).
+    /// Restrict hits to languages (`rust`, `python`, `typescript`, `go`,
+    /// `java`, `nix`, `markdown`).
     /// Applied to every path, including the exact-`rg` shortcut.
     lang: Option<Vec<String>>,
     /// Restrict hits to ignore-style globs (whitelist, `!` negates).
@@ -152,8 +153,9 @@ struct RgParams {
     regex: Option<bool>,
     /// Case-insensitive matching.
     case_insensitive: Option<bool>,
-    /// Restrict to languages (`rust`, `python`, `nix`, `markdown`, or
-    /// extensions like `rs`). Unknown values are rejected.
+    /// Restrict to languages (`rust`, `python`, `typescript`, `go`,
+    /// `java`, `nix`, `markdown`, or extensions like `rs`). Unknown values
+    /// are rejected.
     lang: Option<Vec<String>>,
     /// Restrict to ignore-style globs (whitelist, `!` negates).
     globs: Option<Vec<String>>,

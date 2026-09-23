@@ -77,8 +77,9 @@ enum Command {
         /// Case-insensitive matching.
         #[arg(long)]
         case_insensitive: bool,
-        /// Restrict to languages (`rust`, `python`, `nix`, `markdown`,
-        /// or extensions like `rs`). Repeatable.
+        /// Restrict to languages (`rust`, `python`, `typescript`, `go`,
+        /// `java`, `nix`, `markdown`, or extensions like `rs`).
+        /// Repeatable.
         #[arg(long)]
         lang: Vec<String>,
         /// Restrict to ignore-style globs (whitelist, `!` negates).

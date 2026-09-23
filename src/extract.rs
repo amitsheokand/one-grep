@@ -114,6 +114,62 @@ pub fn extract_with(path: &Path, text: &str, window: Window) -> Vec<Chunk> {
             &["function_definition", "class_definition"],
             window,
         ),
+        "ts" | "mts" | "cts" => symbols(
+            path,
+            text,
+            tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+            &[
+                "function_declaration",
+                "generator_function_declaration",
+                "class_declaration",
+                "abstract_class_declaration",
+                "interface_declaration",
+                "type_alias_declaration",
+                "enum_declaration",
+            ],
+            window,
+        ),
+        "tsx" | "jsx" | "js" | "mjs" | "cjs" => symbols(
+            path,
+            text,
+            tree_sitter_typescript::LANGUAGE_TSX.into(),
+            &[
+                "function_declaration",
+                "generator_function_declaration",
+                "class_declaration",
+                "abstract_class_declaration",
+                "interface_declaration",
+                "type_alias_declaration",
+                "enum_declaration",
+            ],
+            window,
+        ),
+        "go" => symbols(
+            path,
+            text,
+            tree_sitter_go::LANGUAGE.into(),
+            &[
+                "function_declaration",
+                "method_declaration",
+                // `type_spec` carries the name; `type_declaration` is the
+                // unnamed wrapper around it.
+                "type_spec",
+            ],
+            window,
+        ),
+        "java" => symbols(
+            path,
+            text,
+            tree_sitter_java::LANGUAGE.into(),
+            &[
+                "method_declaration",
+                "class_declaration",
+                "interface_declaration",
+                "enum_declaration",
+                "annotation_type_declaration",
+            ],
+            window,
+        ),
         "md" | "markdown" => sections(path, text),
         "nix" => nix_symbols(path, text, window),
         _ => windows(path, text, window),
@@ -402,6 +458,34 @@ mod tests {
         let names: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
         assert!(names.contains(&"Greeter"), "{names:?}");
         assert!(names.contains(&"Greeter > hello"), "{names:?}");
+    }
+
+    #[test]
+    fn typescript_function_and_interface() {
+        let text = "export interface LaneConfig {\n  retries: number;\n}\n\nexport function apply_lane_defaults(config: LaneConfig): boolean {\n  return true;\n}\n";
+        let chunks = extract(Path::new("lane.ts"), text);
+        let names: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
+        assert!(names.contains(&"LaneConfig"), "{names:?}");
+        assert!(names.contains(&"apply_lane_defaults"), "{names:?}");
+        assert!(chunks.iter().all(|c| c.kind == ChunkKind::Symbol));
+    }
+
+    #[test]
+    fn go_function_and_type() {
+        let text = "package lane\n\ntype Config struct {\n\tRetries int\n}\n\nfunc Apply(cfg Config) bool {\n\treturn true\n}\n";
+        let chunks = extract(Path::new("lane.go"), text);
+        let names: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
+        assert!(names.contains(&"Config"), "{names:?}");
+        assert!(names.contains(&"Apply"), "{names:?}");
+    }
+
+    #[test]
+    fn java_class_and_method() {
+        let text = "class Lane {\n  boolean apply() {\n    return true;\n  }\n}\n";
+        let chunks = extract(Path::new("Lane.java"), text);
+        let names: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
+        assert!(names.contains(&"Lane"), "{names:?}");
+        assert!(names.contains(&"Lane > apply"), "{names:?}");
     }
 
     #[test]

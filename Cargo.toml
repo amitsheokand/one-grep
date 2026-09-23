@@ -34,9 +34,12 @@ tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-m
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tree-sitter = "0.26.13"
+tree-sitter-go = "0.25"
+tree-sitter-java = "0.23"
 tree-sitter-nix = "0.3.0"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23"
 url = "2"
 
 [lints.clippy]

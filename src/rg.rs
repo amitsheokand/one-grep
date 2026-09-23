@@ -55,7 +55,15 @@ impl Default for Options {
 }
 
 /// Languages accepted by [`Options::langs`].
-pub const SUPPORTED_LANGS: &[&str] = &["rust", "python", "nix", "markdown"];
+pub const SUPPORTED_LANGS: &[&str] = &[
+    "rust",
+    "python",
+    "typescript",
+    "go",
+    "java",
+    "nix",
+    "markdown",
+];
 
 /// Map a `--lang` value to file extensions, à la `ast-grep --lang`.
 /// Accepts canonical names and bare extensions (`rs`, `py`, `md`).
@@ -64,6 +72,11 @@ pub fn lang_extensions(lang: &str) -> Option<&'static [&'static str]> {
     match lang.trim().to_ascii_lowercase().as_str() {
         "rust" | "rs" => Some(&["rs"]),
         "python" | "py" => Some(&["py"]),
+        "typescript" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => {
+            Some(&["ts", "mts", "cts", "tsx", "jsx", "js", "mjs", "cjs"])
+        }
+        "go" => Some(&["go"]),
+        "java" => Some(&["java"]),
         "nix" => Some(&["nix"]),
         "markdown" | "md" => Some(&["md", "markdown"]),
         _ => None,

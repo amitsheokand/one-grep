@@ -35,7 +35,7 @@ actually care about.
 | # | Packet | Status | Gate |
 | --- | --- | --- | --- |
 | 3.1 | `og-mcp-parity` — expose `--lang` / `--glob` / `--json` on MCP `rg` **and** `search` (CLI grew filters; the MCP table still documents old params — agents cannot pass flags they cannot see) | **Done (lang/globs)** — `search`/`search_ranked` take `lang`+`globs`, post-filter every path (exact shortcut threads them into `rg`); `--json` deliberately deferred to 4.1, where the capped structured format lands instead of a redundant `format` param on a JSON-RPC transport | MCP schema exposes all three; `search` documents how `lang` applies to fused results |
-| 3.2 | `og-langs` — add tree-sitter grammars for TS/Go/Java (the usual agent repos) or document the Rust/Python/Nix/Markdown hole in the first paragraph of the README | **Open** | either new `extract` arms with chunk tests, or the documented hole |
+| 3.2 | `og-langs` — add tree-sitter grammars for TS/Go/Java (the usual agent repos) or document the Rust/Python/Nix/Markdown hole in the first paragraph of the README | **Done** — grammars added (`tree-sitter-typescript` incl. tsx/jsx/js, `tree-sitter-go` via `type_spec` for named types, `tree-sitter-java`); `--lang` map extended; plain JS parses under the TSX grammar | either new `extract` arms with chunk tests, or the documented hole |
 
 ## Phase 4 — Output budget + structure boundary
 
