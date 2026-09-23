@@ -41,7 +41,11 @@ pub struct RankStatus {
 
 impl RankStatus {
     fn jev(exists: Option<f64>) -> Self {
+        // Per-action setpoint lives next to the reading: below 0.30 the
+        // shortlist is returned unchanged but flagged low-confidence, so a
+        // caller scales to warn/verify instead of auto-acting.
         let note = match exists {
+            Some(p) if p < 0.30 => format!("rank: jev exists={p:.2} (low — verify before acting)"),
             Some(p) => format!("rank: jev exists={p:.2}"),
             None => "rank: jev".to_owned(),
         };
@@ -266,6 +270,12 @@ impl Rerank for JevReranker {
 
 /// Score each doc with a Noul; sort highest first. `exists` is recorded
 /// by the caller via [`rerank_hits`].
+///
+/// Meter discipline: one Noul per candidate plus one `exists` Noul, each an
+/// absolute P(yes) with no confidence field. Questions share the same state
+/// (query + candidate list) but must not read each other's answers: every
+/// per-candidate instruction judges that candidate alone, never by rank
+/// against the others. A missing Noul fails closed to 0.0.
 fn rerank_nouls(
     query: &str,
     docs: &[&str],
@@ -432,6 +442,14 @@ mod tests {
         })
         .expect("rank");
         assert_eq!(order, vec![(1, 0.8), (2, 0.4), (0, 0.1)]);
+    }
+
+    #[test]
+    fn low_exists_flags_verify_band() {
+        assert!(RankStatus::jev(Some(0.12)).note.contains("low"));
+        assert!(!RankStatus::jev(Some(0.85)).note.contains("low"));
+        // Missing reading fails closed: no exists value, no approval signal.
+        assert_eq!(RankStatus::jev(None).note, "rank: jev");
     }
 
     #[test]

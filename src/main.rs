@@ -8,6 +8,17 @@ struct Cli {
     command: Command,
 }
 
+/// Ranking backend for `query`. An enum (not a string) so illegal values
+/// are rejected by the parser: the type checker closes the port before any
+/// solver or meter runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RankBackend {
+    /// TypeSafe Jev Nouls over the closed shortlist.
+    Jev,
+    /// Local Jina cross-encoder over fused top-20.
+    Jina,
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Index a workspace for hybrid search.
@@ -28,12 +39,12 @@ enum Command {
         #[arg(long)]
         hybrid: bool,
         /// Rescore fused top-20 with a local cross-encoder (implies hybrid).
-        #[arg(long)]
+        /// Conflicts with `--rank`; prefer `--rank jina`.
+        #[arg(long, conflicts_with = "rank")]
         rerank: bool,
-        /// Rank the retrieval shortlist inside the tool: `jev` (TypeSafe)
-        /// or `jina` (local cross-encoder).
-        #[arg(long, value_name = "BACKEND")]
-        rank: Option<String>,
+        /// Rank the retrieval shortlist inside the tool.
+        #[arg(long, value_enum)]
+        rank: Option<RankBackend>,
     },
     /// Embed workspace chunks for hybrid search.
     Embed {
@@ -112,11 +123,17 @@ async fn main() -> Result<()> {
             rerank,
             rank,
         } => {
-            let rank_jev = rank.as_deref() == Some("jev");
-            let rank_jina = rerank || rank.as_deref() == Some("jina");
-            if rank_jev && rank_jina {
-                anyhow::bail!("use --rank jev or --rerank / --rank jina, not both");
-            }
+            // `--rerank` and `--rank` conflict at parse time, so this match
+            // is exhaustive: illegal combos are unwired, not runtime errors.
+            let backend = match (rerank, rank) {
+                (true, None) => Some(RankBackend::Jina),
+                (false, r) => r,
+                (true, Some(_)) => {
+                    unreachable!("clap conflicts_with rejects --rerank with --rank")
+                }
+            };
+            let rank_jev = backend == Some(RankBackend::Jev);
+            let rank_jina = backend == Some(RankBackend::Jina);
             let indexed = one_grep::index::is_indexed(&path);
             if rank_jev {
                 let hits = if indexed && (hybrid || rank_jev) {

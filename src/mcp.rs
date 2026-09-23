@@ -660,4 +660,25 @@ mod tests {
             );
         }
     }
+
+    /// Forall shape (Kani: arbitrary path string, assert no escape): every
+    /// `..` that would leave `root` resolves to `None`. Sampled below.
+    #[test]
+    fn resolve_in_root_never_escapes() {
+        let dir = tempfile::tempdir().expect("workspace");
+        let root = dir.path();
+        for raw in [
+            "../escape.rs",
+            "a/../../escape.rs",
+            "/etc/passwd",
+            "..",
+            "sub/../../../x",
+        ] {
+            assert!(resolve_in_root(root, raw).is_none(), "{raw}");
+        }
+        for raw in ["a.rs", "sub/b.rs", "./a.rs"] {
+            let resolved = resolve_in_root(root, raw).expect("inside");
+            assert!(resolved.starts_with(root), "{raw}");
+        }
+    }
 }

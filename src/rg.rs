@@ -387,4 +387,24 @@ mod tests {
             assert!(hits.is_empty(), "{pattern}");
         }
     }
+
+    /// Forall shape (Kani: `kani::any::<String>()`, assume valid UTF-8,
+    /// assert idempotence): stripping is a fixed point. Without a Kani
+    /// binary here, the sampled cases below stand in for the harness.
+    #[test]
+    fn normalize_is_idempotent() {
+        for pattern in [
+            "\"foo bar\"",
+            "'foo bar'",
+            "  \"foo bar\"  ",
+            "foo bar",
+            "\"\"",
+            "\"   \"",
+            "\"foo\" OR \"bar\"",
+            "",
+        ] {
+            let once = normalize_pattern(pattern);
+            assert_eq!(normalize_pattern(once), once, "{pattern}");
+        }
+    }
 }
