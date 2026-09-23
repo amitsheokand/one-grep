@@ -219,6 +219,46 @@ windows-rs + big Rust crates before claiming the win.
   skips index/build/vcs dirs. Live-verified (burst → single sync).
 - Harness `rg -l` now `--sort path` (deterministic recall).
 
+## Run 12 — why real concepts fail (2026-09-24, research, no code)
+
+Question: Run 9 shows hybrid 1/4 vs lexical 2/4 on nixos concepts while
+Run 11 (toy fixture) shows hybrid sweeping paraphrase 3/3. Diagnosed per
+query on the Run 9 workspace (index + MiniLM vectors intact), top-10 and
+top-50 both backends, `--json` ranks inspected.
+
+**pretty prompt** (lex hit@3, hyb miss@3): not a retrieval failure. The
+true chunk (home-manager.nix:318) sits at lex=3, vec=29 → fused #6 at
+0.0430, behind AGENTS.md (lex=7, vec=12) at 0.0437. With RRF k=60,
+vector ranks 12→29 differ by 0.003 — the fusion cannot separate them.
+Mechanism: **RRF score compression**. Direction: smaller k (spread) or
+score normalization, judged by the v2 gate + bench.
+
+**never both** (all miss@50): the answer file (mlx-lane.nix) is absent
+from both top-50s. Its discriminating word ("Exclusive", line-1 header
+comment) is **not in any chunk**: `nix_symbols` attaches leading `#`
+comments to bindings only, so file-header prose vanishes. BM25 is then
+correct given its index — the corpus lies by omission. Direction: emit
+the file-header comment block as its own chunk (small, gate-testable).
+
+**no secrets** (all miss@50): the answer ("Local secrets (gitignored,
+never committed)") drowns inside a 130-line `zsh > initContent` symbol
+chunk (lines 30–160, ~4 KB). Length-norm dilution buries it under
+tighter false friends (`estimate_tokens`). Same file also yields two
+overlapping chunks (14–161 and 30–160) — redundant slots. Direction:
+cap symbol chunk size (split with breadcrumb inheritance) and prefer
+non-overlapping coverage. Chunk audit: longest index chunks run
+130–253 lines (test files, flake outputs).
+
+**tokens sense ambiguity** (no secrets, second-order): even retrieved,
+"tokens" matches LLM-token code (`estimate_tokens`), not API secrets.
+No ranking constant fixes word sense. Direction: semantic judge
+experiment — LocalJev rerank over the fused shortlist on the 4 real
+concepts (wiring already proven by mock test; needs a local endpoint).
+
+Not pursued: tuning fusion constants against 4 queries (overfit
+territory, per Run 5 discipline). Each direction above gets its own
+gate check (v2 paraphrase floor + Run 9 re-run) before merging.
+
 ## Run 11 — intent paths on the frozen v2 fixture (2026-09-24)
 
 `ideasearch-v2`: 12 cases (3 keyword / 3 paraphrase / 2 symbol /
