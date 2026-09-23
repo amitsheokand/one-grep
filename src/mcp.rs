@@ -199,14 +199,23 @@ impl OneGrep {
             }
             route::Route::Identifier(term) => {
                 // Exact beats fuzzy: single tokens go BM25, never hybrid.
-                let lines: Vec<String> = if index::is_indexed(&root) {
+                let indexed_now = index::is_indexed(&root);
+                let lines: Vec<String> = if indexed_now {
                     lexical(&root, &term, limit)?
                 } else {
                     rg_fallback_lines(&root, &term, limit)?
                 };
                 let body = lines.join("\n---\n");
-                let text = if index::is_indexed(&root) {
-                    body
+                let mut notes = Vec::new();
+                if indexed_now && index::is_stale(&root) {
+                    notes.push(index::stale_note(&root));
+                }
+                let text = if indexed_now {
+                    if notes.is_empty() {
+                        body
+                    } else {
+                        format!("{}\n\n{body}", notes.join("\n"))
+                    }
                 } else {
                     format!("{}\n\n{body}", rg::unindexed_note(&root))
                 };
@@ -252,6 +261,9 @@ impl OneGrep {
         };
         let body = lines.join("\n---\n");
         let mut notes = Vec::new();
+        if indexed && index::is_stale(&root) {
+            notes.push(index::stale_note(&root));
+        }
         if used_vectors && crate::vectors::is_stale(&root) {
             notes.push(crate::vectors::stale_note(&root));
         }
@@ -337,6 +349,9 @@ impl OneGrep {
             .collect::<Vec<_>>()
             .join("\n---\n");
         let mut notes = vec![status.note.clone()];
+        if indexed && index::is_stale(&root) {
+            notes.push(index::stale_note(&root));
+        }
         if want_vectors && crate::vectors::is_stale(&root) {
             notes.push(crate::vectors::stale_note(&root));
         }

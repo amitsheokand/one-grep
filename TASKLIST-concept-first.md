@@ -28,7 +28,7 @@ actually care about.
 | # | Packet | Status | Gate |
 | --- | --- | --- | --- |
 | 2.1 | `og-incr-embed` — hash chunks, embed only new/changed windows, persist vectors beside tantivy; `watch` re-syncs vectors or marks them stale (today `watch` re-syncs the index only, so vectors silently rot) | **Done** — sync was already ID-incremental; added same-span text-change re-embed (the real rot: edits keeping spans), `vectors.stale` marker (`watch` marks on index moves, `embed` clears), `vectors: stale` note on CLI/MCP hybrid paths, verified live | second `embed` on unchanged tree is near-noop (timed); `watch` + edit + `query --hybrid` reflects the edit |
-| 2.2 | `og-stale-contract` — detect dirty trees (mtime vs index generation); `query` prints `index: stale` next to the existing `unindexed` fallback so agents never cite yesterday's chunks | **Open** | touch-a-file → stale note; re-index clears it |
+| 2.2 | `og-stale-contract` — detect dirty trees (mtime vs index generation); `query` prints `index: stale` next to the existing `unindexed` fallback so agents never cite yesterday's chunks | **Done** — `index::is_stale` (manifest mtime+len vs walk; missing manifest is unindexed, not stale), note on all CLI/MCP index-backed paths, verified live: touch → note + stale chunk cited, re-index → clears | touch-a-file → stale note; re-index clears it |
 
 ## Phase 3 — Coverage honesty (parity + languages)
 

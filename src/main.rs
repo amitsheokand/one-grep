@@ -186,8 +186,14 @@ async fn main() -> Result<()> {
                         if indexed {
                             let hits = one_grep::index::search(&path, &term, limit)?;
                             if json {
+                                if one_grep::index::is_stale(&path) {
+                                    eprintln!("{}", one_grep::index::stale_note(&path));
+                                }
                                 print_json(&hits)?;
                                 return Ok(());
+                            }
+                            if one_grep::index::is_stale(&path) {
+                                println!("{}", one_grep::index::stale_note(&path));
                             }
                             for hit in hits {
                                 println!(
@@ -229,6 +235,9 @@ async fn main() -> Result<()> {
                     if !indexed {
                         eprintln!("{}", one_grep::rg::unindexed_note(&path));
                     }
+                    if indexed && one_grep::index::is_stale(&path) {
+                        eprintln!("{}", one_grep::index::stale_note(&path));
+                    }
                     if indexed && one_grep::vectors::is_stale(&path) {
                         eprintln!("{}", one_grep::vectors::stale_note(&path));
                     }
@@ -238,6 +247,9 @@ async fn main() -> Result<()> {
                 println!("{}", status.note);
                 if !indexed {
                     println!("{}", one_grep::rg::unindexed_note(&path));
+                }
+                if indexed && one_grep::index::is_stale(&path) {
+                    println!("{}", one_grep::index::stale_note(&path));
                 }
                 if indexed && one_grep::vectors::is_stale(&path) {
                     println!("{}", one_grep::vectors::stale_note(&path));
@@ -292,11 +304,17 @@ async fn main() -> Result<()> {
                     reranker.as_ref().map(|r| r as &dyn one_grep::embed::Rerank),
                 )?;
                 if json {
+                    if one_grep::index::is_stale(&path) {
+                        eprintln!("{}", one_grep::index::stale_note(&path));
+                    }
                     if one_grep::vectors::is_stale(&path) {
                         eprintln!("{}", one_grep::vectors::stale_note(&path));
                     }
                     print_json(&hits)?;
                     return Ok(());
+                }
+                if one_grep::index::is_stale(&path) {
+                    println!("{}", one_grep::index::stale_note(&path));
                 }
                 if one_grep::vectors::is_stale(&path) {
                     println!("{}", one_grep::vectors::stale_note(&path));
@@ -316,8 +334,14 @@ async fn main() -> Result<()> {
             }
             let hits = one_grep::index::search(&path, &query, limit)?;
             if json {
+                if one_grep::index::is_stale(&path) {
+                    eprintln!("{}", one_grep::index::stale_note(&path));
+                }
                 print_json(&hits)?;
                 return Ok(());
+            }
+            if one_grep::index::is_stale(&path) {
+                println!("{}", one_grep::index::stale_note(&path));
             }
             for hit in hits {
                 println!(

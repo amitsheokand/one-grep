@@ -230,6 +230,52 @@ pub fn is_indexed(workspace: &Path) -> bool {
     engine::index_dir(workspace).is_dir()
 }
 
+/// Whether the index no longer matches the tree: any walked file whose
+/// (mtime, len) differs from the manifest, or any manifest entry with no
+/// file behind it. A missing manifest is not "stale" — callers already
+/// report that case as unindexed.
+#[must_use]
+pub fn is_stale(workspace: &Path) -> bool {
+    if !manifest_path(workspace).exists() {
+        return false;
+    }
+    let manifest = match load_manifest(workspace) {
+        Ok(m) => m,
+        Err(_) => return true,
+    };
+    let mut seen = std::collections::HashSet::new();
+    for entry in engine::walker(workspace).filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(rel) = path
+            .strip_prefix(workspace)
+            .map(|r| r.to_string_lossy().into_owned())
+        else {
+            return true;
+        };
+        seen.insert(rel.clone());
+        let meta = match file_meta(path) {
+            Ok(m) => m,
+            Err(_) => return true,
+        };
+        if manifest.get(&rel) != Some(&meta) {
+            return true;
+        }
+    }
+    manifest.keys().any(|k| !seen.contains(k))
+}
+
+/// Human note pointing at the fix. Shown next to index-backed results.
+#[must_use]
+pub fn stale_note(workspace: &Path) -> String {
+    format!(
+        "index: stale (tree changed since last sync; run: one-grep index {})",
+        workspace.display()
+    )
+}
+
 /// Run a BM25 query over chunk text and breadcrumbs.
 ///
 /// # Errors
@@ -360,5 +406,24 @@ mod tests {
         assert!(!is_indexed(dir.path()));
         sync(dir.path()).expect("sync");
         assert!(is_indexed(dir.path()));
+    }
+
+    #[test]
+    fn stale_lifecycle_touch_resync() {
+        let dir = workspace_with(&[("a.txt", "alpha\n")]);
+        // No manifest yet: unindexed, not stale (separate note owns that).
+        assert!(!is_stale(dir.path()));
+        sync(dir.path()).expect("sync");
+        assert!(!is_stale(dir.path()));
+        // Touch a file with different bytes: dirty.
+        std::fs::write(dir.path().join("a.txt"), "alpha plus more\n").expect("write");
+        assert!(is_stale(dir.path()));
+        assert!(stale_note(dir.path()).contains("one-grep index"));
+        // Removed file: dirty too.
+        std::fs::remove_file(dir.path().join("a.txt")).expect("remove");
+        assert!(is_stale(dir.path()));
+        // Re-sync clears it.
+        sync(dir.path()).expect("resync");
+        assert!(!is_stale(dir.path()));
     }
 }
