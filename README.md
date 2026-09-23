@@ -82,7 +82,7 @@ Test suite: `cargo test --lib` — 80 passed, 0 failed (includes `rg`,
 cargo build --release
 ./target/release/one-grep index <path>
 ./target/release/one-grep embed <path> [--model minilm|arctic-m|gemma-300m|<dir>]
-./target/release/one-grep query "where is auth handled?" --path <path> [--limit 10] [--hybrid] [--rerank] [--rank jev|jina] [--json]
+./target/release/one-grep query "where is auth handled?" --path <path> [--limit 10] [--hybrid] [--rerank] [--rank jev|jina|llama] [--rank-endpoint http://127.0.0.1:8080] [--json]
 # `search` is an alias of `query`
 ./target/release/one-grep rg "pattern" <path> [--regex] [--case-insensitive] [--lang rust|python|typescript|go|java|nix|markdown] [--glob '*.rs'] [--limit 100] [--json]
 ./target/release/one-grep watch <path>
@@ -95,6 +95,12 @@ Notes:
 
 * `query` without an index prints an `rg-fallback` live-grep result instead
   of failing.
+* Rank backends (`--rank` / `search_ranked rank`): `jev` (hosted Nouls),
+  `jina` (local ONNX cross-encoder, downloads on first use), `llama`
+  (llama.cpp server with `--rerank`, e.g. `bge-reranker-v2-m3` on Vulkan;
+  endpoint `ONE_GREP_RERANK_URL` or `--rank-endpoint`, default
+  `http://127.0.0.1:8080`). Load or endpoint failures fall back to
+  retrieval order, never an error.
 * `rg` is literal unless `--regex`. `query --rank jev` needs
   `TYPESAFE_API_KEY` (else `~/.config/typesafe.env`), model
   `JEV_MCP_MODEL` default `jev-1.13.0`; without a key it emits a
@@ -191,7 +197,7 @@ Honest substitutes, depending on which half of one-grep you need:
     trusting low-`exists` bands.
   * [OpenJev](https://github.com/razorback16/openjev) — patched vLLM
     backend with a structured logit read; needs NVIDIA hardware.
-* **Local rerank without Jev at all**: `query --rerank` / `--rank jina`
+* **Local rerank without Jev at all**: `query --rerank` / `--rank jina` / `--rank llama` (llama.cpp `--rerank` server)
   rescores with an on-device Jina cross-encoder — no key, no network,
   ~1.1 s per query. In our bench it sweeps keywords (10/10) but adds
   nothing on paraphrased concepts (0/4).
