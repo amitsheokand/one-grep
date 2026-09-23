@@ -221,32 +221,46 @@ impl OneGrep {
         }
         let indexed = index::is_indexed(&root);
         let fuse = p.fuse.unwrap_or(true);
+        // Did retrieval actually consume vectors? Only then is their
+        // staleness worth a note.
+        let mut used_vectors = false;
         let lines: Vec<String> = if !indexed {
             rg_fallback_lines(&root, &query, limit)?
         } else if fuse {
             match provider() {
-                Ok(provider) => fuse::hybrid(&root, &query, limit, Some(provider), None)
-                    .map_err(internal)?
-                    .iter()
-                    .map(|h| {
-                        render(
-                            &h.path,
-                            h.start,
-                            h.end,
-                            &h.breadcrumb,
-                            &format!("{:.4}", h.score),
-                            &h.text,
-                        )
-                    })
-                    .collect(),
+                Ok(provider) => {
+                    used_vectors = true;
+                    fuse::hybrid(&root, &query, limit, Some(provider), None)
+                        .map_err(internal)?
+                        .iter()
+                        .map(|h| {
+                            render(
+                                &h.path,
+                                h.start,
+                                h.end,
+                                &h.breadcrumb,
+                                &format!("{:.4}", h.score),
+                                &h.text,
+                            )
+                        })
+                        .collect()
+                }
                 Err(_) => lexical(&root, &query, limit)?,
             }
         } else {
             lexical(&root, &query, limit)?
         };
         let body = lines.join("\n---\n");
+        let mut notes = Vec::new();
+        if used_vectors && crate::vectors::is_stale(&root) {
+            notes.push(crate::vectors::stale_note(&root));
+        }
         let text = if indexed {
-            body
+            if notes.is_empty() {
+                body
+            } else {
+                format!("{}\n\n{body}", notes.join("\n"))
+            }
         } else {
             format!("{}\n\n{body}", rg::unindexed_note(&root))
         };
@@ -289,6 +303,9 @@ impl OneGrep {
         let indexed = index::is_indexed(&root);
         let query_for_rank = query.clone();
         let root_for_rank = root.clone();
+        // Identifier queries stay lexical (router); only the fused path
+        // consumes vectors, so only it can report them stale.
+        let want_vectors = indexed && fuse && !lexical_only;
         let (status, hits) = tokio::task::spawn_blocking(move || {
             let hits = if !indexed || lexical_only {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
@@ -319,10 +336,14 @@ impl OneGrep {
             })
             .collect::<Vec<_>>()
             .join("\n---\n");
-        let mut text = format!("{}\n\n{body}", status.note);
-        if !indexed {
-            text = format!("{}\n{}\n\n{body}", status.note, rg::unindexed_note(&root));
+        let mut notes = vec![status.note.clone()];
+        if want_vectors && crate::vectors::is_stale(&root) {
+            notes.push(crate::vectors::stale_note(&root));
         }
+        if !indexed {
+            notes.push(rg::unindexed_note(&root));
+        }
+        let text = format!("{}\n\n{body}", notes.join("\n"));
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 

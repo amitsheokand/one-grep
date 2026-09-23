@@ -14,6 +14,9 @@ use crate::{Error, embed::EmbedProvider, engine, extract};
 
 /// Store filename inside the index dir.
 const STORE: &str = "vectors.json";
+/// Marker written when the index moves on without the vectors (e.g. `watch`
+/// re-syncs the index only). Cleared by the next successful [`sync`].
+const STALE_MARKER: &str = "vectors.stale";
 /// Texts per embedding call. Small: batches pad to the longest sequence,
 /// so big batches of long code chunks waste most work on padding.
 const BATCH: usize = 16;
@@ -79,6 +82,66 @@ fn save(workspace: &Path, store: &Store) -> Result<(), Error> {
 
 fn chunk_id(rel: &str, start: u64, end: u64, breadcrumb: &str) -> String {
     format!("{rel}\0{start}\0{end}\0{breadcrumb}")
+}
+
+/// Whether the vector store is marked stale (index moved without it).
+#[must_use]
+pub fn is_stale(workspace: &Path) -> bool {
+    engine::index_dir(workspace).join(STALE_MARKER).exists()
+}
+
+/// Mark the store stale. Called when the index re-syncs without embedding.
+pub fn mark_stale(workspace: &Path) -> Result<(), Error> {
+    std::fs::create_dir_all(engine::index_dir(workspace))?;
+    std::fs::write(engine::index_dir(workspace).join(STALE_MARKER), "stale\n")?;
+    Ok(())
+}
+
+/// Human note pointing at the fix. Shown next to hybrid results.
+#[must_use]
+pub fn stale_note(workspace: &Path) -> String {
+    format!(
+        "vectors: stale (index changed since last embed; run: one-grep embed {})",
+        workspace.display()
+    )
+}
+
+/// Queue a chunk for embedding unless the store already holds the same
+/// text under the same id. Same spans with different text (edited body)
+/// re-embed instead of silently serving yesterday's vector.
+fn queue_chunk(
+    store: &Store,
+    current_ids: &mut HashSet<String>,
+    pending: &mut Vec<(String, VectorItem)>,
+    rel: String,
+    start: u64,
+    end: u64,
+    kind: String,
+    breadcrumb: String,
+    text: String,
+) {
+    let id = chunk_id(&rel, start, end, &breadcrumb);
+    current_ids.insert(id.clone());
+    if pending.iter().any(|(pid, _)| pid == &id) {
+        return;
+    }
+    if let Some(stored) = store.items.get(&id) {
+        if stored.text == text {
+            return;
+        }
+    }
+    pending.push((
+        id,
+        VectorItem {
+            rel,
+            start,
+            end,
+            kind,
+            breadcrumb,
+            text,
+            embedding: Vec::new(),
+        },
+    ));
 }
 
 /// Cosine similarity of L2-normalized vectors (dot product).
@@ -148,50 +211,39 @@ pub fn sync(workspace: &Path, provider: &dyn EmbedProvider) -> Result<Stats, Err
             .to_string_lossy()
             .into_owned();
         for chunk in extract::extract_file_with(path, extract::EMBED_WINDOW)? {
-            let id = chunk_id(&rel, chunk.start, chunk.end, &chunk.breadcrumb);
-            current_ids.insert(id.clone());
-            if store.items.contains_key(&id) || pending.iter().any(|(pid, _)| pid == &id) {
-                continue;
-            }
-            pending.push((
-                id,
-                VectorItem {
-                    rel: rel.clone(),
-                    start: chunk.start,
-                    end: chunk.end,
-                    kind: match chunk.kind {
-                        extract::ChunkKind::Symbol => "symbol".to_owned(),
-                        extract::ChunkKind::Section => "section".to_owned(),
-                        extract::ChunkKind::Window => "window".to_owned(),
-                    },
-                    breadcrumb: chunk.breadcrumb,
-                    text: chunk.text,
-                    embedding: Vec::new(),
-                },
-            ));
+            let kind = match chunk.kind {
+                extract::ChunkKind::Symbol => "symbol".to_owned(),
+                extract::ChunkKind::Section => "section".to_owned(),
+                extract::ChunkKind::Window => "window".to_owned(),
+            };
+            queue_chunk(
+                &store,
+                &mut current_ids,
+                &mut pending,
+                rel.clone(),
+                chunk.start,
+                chunk.end,
+                kind,
+                chunk.breadcrumb,
+                chunk.text,
+            );
         }
     }
 
     // Chain chunks share IDs with the lexical index (same rel/span/crumb).
     for chunk in crate::chains::extract_workspace(workspace)? {
         let rel = chunk.path.to_string_lossy().into_owned();
-        let id = chunk_id(&rel, chunk.start, chunk.end, &chunk.breadcrumb);
-        current_ids.insert(id.clone());
-        if store.items.contains_key(&id) || pending.iter().any(|(pid, _)| pid == &id) {
-            continue;
-        }
-        pending.push((
-            id,
-            VectorItem {
-                rel,
-                start: chunk.start,
-                end: chunk.end,
-                kind: "chain".to_owned(),
-                breadcrumb: chunk.breadcrumb,
-                text: chunk.text,
-                embedding: Vec::new(),
-            },
-        ));
+        queue_chunk(
+            &store,
+            &mut current_ids,
+            &mut pending,
+            rel,
+            chunk.start,
+            chunk.end,
+            "chain".to_owned(),
+            chunk.breadcrumb,
+            chunk.text,
+        );
     }
 
     let mut embedded = 0;
@@ -218,6 +270,8 @@ pub fn sync(workspace: &Path, provider: &dyn EmbedProvider) -> Result<Stats, Err
     let removed = before - store.items.len();
     let total = store.items.len();
     save(workspace, &store)?;
+    // A successful sync owns the marker: vectors match the tree again.
+    let _ = std::fs::remove_file(engine::index_dir(workspace).join(STALE_MARKER));
     Ok(Stats {
         embedded,
         removed,
@@ -310,6 +364,39 @@ pub mod tests {
         let stats = sync(dir.path(), &TestProvider).expect("resync");
         assert_eq!(stats.removed, 1);
         assert_eq!(stats.total, 0);
+    }
+
+    #[test]
+    fn sync_reembeds_edited_text_under_same_spans() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.txt");
+        std::fs::write(&path, "hello world\nsecond line\n").expect("write");
+        let first = sync(dir.path(), &TestProvider).expect("sync");
+        assert!(first.embedded > 0);
+        // Same line count (same spans), different text: must re-embed,
+        // not silently serve yesterday's vector.
+        std::fs::write(&path, "goodbye world\nsecond line\n").expect("rewrite");
+        let second = sync(dir.path(), &TestProvider).expect("resync");
+        assert_eq!(second.embedded, first.embedded);
+        let items = load_items(dir.path()).expect("load");
+        assert!(items.iter().any(|i| i.text.contains("goodbye")));
+        assert!(!items.iter().any(|i| i.text.contains("hello world")));
+        // Unchanged third sync is a noop again.
+        let third = sync(dir.path(), &TestProvider).expect("resync");
+        assert_eq!(third.embedded, 0);
+    }
+
+    #[test]
+    fn stale_marker_round_trips_through_sync() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("a.txt"), "hello\n").expect("write");
+        sync(dir.path(), &TestProvider).expect("sync");
+        assert!(!is_stale(dir.path()));
+        mark_stale(dir.path()).expect("mark");
+        assert!(is_stale(dir.path()));
+        assert!(stale_note(dir.path()).contains("one-grep embed"));
+        sync(dir.path(), &TestProvider).expect("resync");
+        assert!(!is_stale(dir.path()));
     }
 
     #[test]

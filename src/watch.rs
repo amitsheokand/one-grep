@@ -73,6 +73,17 @@ pub fn run(workspace: &Path) -> Result<(), Error> {
                         "synced: {} scanned, {} upserted, {} chunks, {} removed",
                         stats.scanned, stats.upserted, stats.chunks, stats.removed
                     );
+                    // The index moved without the vectors: mark them stale
+                    // instead of embedding inline (model load is too heavy
+                    // for a watcher). `embed` clears the marker.
+                    if stats.upserted + stats.removed > 0
+                        && crate::vectors::store_model(&workspace)
+                            .map(|m| m.is_some())
+                            .unwrap_or(false)
+                    {
+                        crate::vectors::mark_stale(&workspace)?;
+                        eprintln!("{}", crate::vectors::stale_note(&workspace));
+                    }
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
