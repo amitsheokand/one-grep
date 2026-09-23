@@ -118,6 +118,11 @@ struct SearchParams {
     fts: Option<Vec<String>>,
     /// Fuse vector similarity with BM25 (default true).
     fuse: Option<bool>,
+    /// Restrict hits to languages (`rust`, `python`, `nix`, `markdown`).
+    /// Applied to every path, including the exact-`rg` shortcut.
+    lang: Option<Vec<String>>,
+    /// Restrict hits to ignore-style globs (whitelist, `!` negates).
+    globs: Option<Vec<String>>,
     /// Max hits (default 10, max 50).
     limit: Option<usize>,
 }
@@ -174,7 +179,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Single identifier tokens go BM25, never hybrid. `lang`/`globs` filter hits on every path. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
     )]
     async fn search(
         &self,
@@ -183,6 +188,7 @@ impl OneGrep {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
+        let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
         match route::route(&p.query, fts) {
             route::Route::Literal(pattern) => {
                 return self
@@ -191,8 +197,8 @@ impl OneGrep {
                         pattern,
                         regex: Some(false),
                         case_insensitive: Some(false),
-                        lang: None,
-                        globs: None,
+                        lang: p.lang.clone(),
+                        globs: p.globs.clone(),
                         limit: Some(limit),
                     }))
                     .await;
@@ -201,9 +207,9 @@ impl OneGrep {
                 // Exact beats fuzzy: single tokens go BM25, never hybrid.
                 let indexed_now = index::is_indexed(&root);
                 let lines: Vec<String> = if indexed_now {
-                    lexical(&root, &term, limit)?
+                    lexical(&root, &term, limit, &filter)?
                 } else {
-                    rg_fallback_lines(&root, &term, limit)?
+                    rg_fallback_lines(&root, &term, limit, &filter)?
                 };
                 let body = lines.join("\n---\n");
                 let mut notes = Vec::new();
@@ -234,7 +240,7 @@ impl OneGrep {
         // staleness worth a note.
         let mut used_vectors = false;
         let lines: Vec<String> = if !indexed {
-            rg_fallback_lines(&root, &query, limit)?
+            rg_fallback_lines(&root, &query, limit, &filter)?
         } else if fuse {
             match provider() {
                 Ok(provider) => {
@@ -242,22 +248,14 @@ impl OneGrep {
                     fuse::hybrid(&root, &query, limit, Some(provider), None)
                         .map_err(internal)?
                         .iter()
-                        .map(|h| {
-                            render(
-                                &h.path,
-                                h.start,
-                                h.end,
-                                &h.breadcrumb,
-                                &format!("{:.4}", h.score),
-                                &h.text,
-                            )
-                        })
+                        .filter(|h| filter.keep(&h.path))
+                        .map(render_fused)
                         .collect()
                 }
-                Err(_) => lexical(&root, &query, limit)?,
+                Err(_) => lexical(&root, &query, limit, &filter)?,
             }
         } else {
-            lexical(&root, &query, limit)?
+            lexical(&root, &query, limit, &filter)?
         };
         let body = lines.join("\n---\n");
         let mut notes = Vec::new();
@@ -289,6 +287,7 @@ impl OneGrep {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
+        let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
         let cls = route::route(&p.query, fts);
         if let route::Route::Literal(pattern) = &cls {
             return self
@@ -297,8 +296,8 @@ impl OneGrep {
                     pattern: pattern.clone(),
                     regex: Some(false),
                     case_insensitive: Some(false),
-                    lang: None,
-                    globs: None,
+                    lang: p.lang.clone(),
+                    globs: p.globs.clone(),
                     limit: Some(limit),
                 }))
                 .await;
@@ -319,7 +318,7 @@ impl OneGrep {
         // consumes vectors, so only it can report them stale.
         let want_vectors = indexed && fuse && !lexical_only;
         let (status, hits) = tokio::task::spawn_blocking(move || {
-            let hits = if !indexed || lexical_only {
+            let mut hits = if !indexed || lexical_only {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
             } else if fuse {
                 match provider() {
@@ -329,6 +328,10 @@ impl OneGrep {
             } else {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
             }?;
+            // Filter before the meter: Jev scores winners only, and
+            // `limit` bounds what the caller ever sees.
+            hits.retain(|h| filter.keep(&h.path));
+            hits.truncate(limit);
             Ok::<_, crate::Error>(crate::jev::rerank_hits(&query_for_rank, hits))
         })
         .await
@@ -336,16 +339,7 @@ impl OneGrep {
         .map_err(internal)?;
         let body = hits
             .iter()
-            .map(|h| {
-                render(
-                    &h.path,
-                    h.start,
-                    h.end,
-                    &h.breadcrumb,
-                    &format!("{:.4}", h.score),
-                    &h.text,
-                )
-            })
+            .map(render_fused)
             .collect::<Vec<_>>()
             .join("\n---\n");
         let mut notes = vec![status.note.clone()];
@@ -444,29 +438,84 @@ impl Default for OneGrep {
     }
 }
 
-fn lexical(root: &Path, query: &str, limit: usize) -> Result<Vec<String>, McpError> {
+fn lexical(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    filter: &HitFilter,
+) -> Result<Vec<String>, McpError> {
     Ok(index::search(root, query, limit)
         .map_err(internal)?
         .iter()
-        .map(|h| {
-            render(
-                &h.path,
-                h.start,
-                h.end,
-                &h.breadcrumb,
-                &format!("{:.2}", h.score),
-                &h.text,
-            )
-        })
+        .filter(|h| filter.keep(&h.path))
+        .map(render_ranked)
         .collect())
 }
 
-fn rg_fallback_lines(root: &Path, query: &str, limit: usize) -> Result<Vec<String>, McpError> {
+fn rg_fallback_lines(
+    root: &Path,
+    query: &str,
+    limit: usize,
+    filter: &HitFilter,
+) -> Result<Vec<String>, McpError> {
     Ok(rg::fallback_search(root, query, limit)
         .map_err(internal)?
         .iter()
-        .map(|h| render(&h.path, h.line, h.line, "rg-fallback", "live", &h.text))
+        .filter(|h| filter.keep(&h.path))
+        .map(render_live)
         .collect())
+}
+
+/// Post-retrieval `--lang` / `--glob` filter for `search` hits.
+/// Validation fails fast (unknown langs, bad globs) as caller errors.
+#[derive(Clone, Debug)]
+struct HitFilter {
+    langs: Vec<String>,
+    globs: rg::GlobFilter,
+}
+
+impl HitFilter {
+    fn build(
+        root: &Path,
+        lang: Option<Vec<String>>,
+        globs: Option<Vec<String>>,
+    ) -> Result<Self, McpError> {
+        let langs = lang.unwrap_or_default();
+        rg::validate_langs(&langs).map_err(rg_error)?;
+        let globs = rg::GlobFilter::build(root, &globs.unwrap_or_default())
+            .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+        Ok(Self { langs, globs })
+    }
+
+    fn keep(&self, path: &Path) -> bool {
+        self.globs.keep(path) && rg::matches_lang(path, &self.langs).unwrap_or(false)
+    }
+}
+
+fn render_ranked(h: &index::RankedHit) -> String {
+    render(
+        &h.path,
+        h.start,
+        h.end,
+        &h.breadcrumb,
+        &format!("{:.2}", h.score),
+        &h.text,
+    )
+}
+
+fn render_fused(h: &fuse::FusedHit) -> String {
+    render(
+        &h.path,
+        h.start,
+        h.end,
+        &h.breadcrumb,
+        &format!("{:.4}", h.score),
+        &h.text,
+    )
+}
+
+fn render_live(h: &rg::Hit) -> String {
+    render(&h.path, h.line, h.line, "rg-fallback", "live", &h.text)
 }
 
 #[tool_handler]
@@ -567,6 +616,8 @@ mod tests {
                     query: query.into(),
                     fts: None,
                     fuse: Some(false),
+                    lang: None,
+                    globs: None,
                     limit: None,
                 })))
                 .expect("search");
@@ -595,6 +646,8 @@ mod tests {
                     query: query.into(),
                     fts,
                     fuse: Some(false),
+                    lang: None,
+                    globs: None,
                     limit: None,
                 }))
                 .await
@@ -615,6 +668,8 @@ mod tests {
                 query: "where is supersonic_ferret".into(),
                 fts: None,
                 fuse: Some(false),
+                lang: None,
+                globs: None,
                 limit: Some(5),
             }))
             .await
@@ -705,6 +760,8 @@ mod tests {
                     query: query.into(),
                     fts: None,
                     fuse: Some(false),
+                    lang: None,
+                    globs: None,
                     limit: None,
                 }))
                 .await
@@ -820,6 +877,8 @@ mod tests {
                 query: "canary query terms here".into(),
                 fts: None,
                 fuse: Some(false),
+                lang: None,
+                globs: None,
                 limit: Some(5),
             }))
             .await
@@ -844,5 +903,51 @@ mod tests {
             assert!(pos >= cursor, "{path} out of order: {body}");
             cursor = pos + path.len();
         }
+    }
+
+    #[tokio::test]
+    async fn search_lang_filter_applies_to_lexical_hits() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("main.rs"),
+            "needle_haystack_unique here\n",
+        )
+        .expect("fixture");
+        std::fs::write(
+            workspace.path().join("notes.txt"),
+            "needle_haystack_unique here\n",
+        )
+        .expect("fixture");
+        crate::index::sync(workspace.path()).expect("sync");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let result = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root: root.clone(),
+                query: "needle_haystack_unique".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: Some(vec!["rust".into()]),
+                globs: None,
+                limit: None,
+            }))
+            .await
+            .expect("search");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("main.rs"), "{body}");
+        assert!(!body.contains("notes.txt"), "{body}");
+        let err = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root,
+                query: "needle_haystack_unique".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: Some(vec!["cobol".into()]),
+                globs: None,
+                limit: None,
+            }))
+            .await
+            .expect_err("unknown lang must fail fast");
+        assert!(err.message.contains("cobol"), "{err:?}");
     }
 }

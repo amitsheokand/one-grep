@@ -94,6 +94,82 @@ fn resolve_lang_exts(langs: &[String]) -> Result<Option<Vec<String>>, Error> {
     Ok(Some(exts))
 }
 
+/// Whether `path` passes a language allowlist. Empty `langs` passes
+/// everything; unknown entries fail closed like [`Options::langs`].
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for unknown languages.
+pub fn matches_lang(path: &Path, langs: &[String]) -> Result<bool, Error> {
+    let Some(exts) = resolve_lang_exts(langs)? else {
+        return Ok(true);
+    };
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    Ok(exts.iter().any(|e| *e == ext))
+}
+
+/// Fail fast on unknown languages before any retrieval runs.
+///
+/// # Errors
+///
+/// Returns [`Error::InvalidInput`] for unknown languages.
+pub fn validate_langs(langs: &[String]) -> Result<(), Error> {
+    resolve_lang_exts(langs).map(|_| ())
+}
+
+/// Post-retrieval include-glob filter with the same whitelist semantics as
+/// the walker overrides: a hit passes unless ignored, and when positive
+/// globs exist it must match one. `!`-prefixed globs exclude.
+#[derive(Clone, Debug)]
+pub struct GlobFilter {
+    matcher: Option<ignore::overrides::Override>,
+    positive: bool,
+}
+
+impl GlobFilter {
+    /// Build from caller globs. Empty input matches everything.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Walk`] for malformed glob patterns.
+    pub fn build(root: &Path, globs: &[String]) -> Result<Self, Error> {
+        if globs.is_empty() {
+            return Ok(Self {
+                matcher: None,
+                positive: false,
+            });
+        }
+        let mut builder = ignore::overrides::OverrideBuilder::new(root);
+        for glob in globs {
+            builder.add(glob)?;
+        }
+        Ok(Self {
+            matcher: Some(builder.build()?),
+            positive: globs.iter().any(|g| !g.starts_with('!')),
+        })
+    }
+
+    /// Whether a hit path survives the filter.
+    #[must_use]
+    pub fn keep(&self, path: &Path) -> bool {
+        let Some(matcher) = &self.matcher else {
+            return true;
+        };
+        let matched = matcher.matched(path, false);
+        if matched.is_ignore() {
+            return false;
+        }
+        if matched.is_whitelist() {
+            return true;
+        }
+        !self.positive
+    }
+}
+
 /// Stopwords dropped when turning an NL query into live-grep terms.
 const STOPWORDS: &[&str] = &[
     "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "does", "for", "from", "how",
@@ -538,5 +614,43 @@ mod tests {
         assert_eq!(value[0]["line"], 1);
         assert_eq!(value[0]["text"], "hello");
         assert!(value[0]["path"].as_str().unwrap().ends_with("a.txt"));
+    }
+
+    #[test]
+    fn matches_lang_accepts_names_and_extensions() {
+        use std::path::Path;
+        for (lang, path, want) in [
+            ("rust", "src/main.rs", true),
+            ("rs", "src/main.rs", true),
+            ("python", "src/main.rs", false),
+            ("markdown", "docs/a.md", true),
+            ("md", "docs/a.markdown", true),
+            ("nix", "hosts/x.nix", true),
+            ("rust", "no-extension", false),
+        ] {
+            assert_eq!(
+                matches_lang(Path::new(path), &[lang.to_owned()]).expect("valid"),
+                want,
+                "{lang} {path}"
+            );
+        }
+        assert!(matches_lang(Path::new("a.rs"), &[]).expect("empty passes"));
+        let err = matches_lang(Path::new("a.rs"), &["cobol".to_owned()]).expect_err("unknown");
+        assert!(matches!(err, Error::InvalidInput(_)));
+    }
+
+    #[test]
+    fn glob_filter_whitelist_and_negation() {
+        use std::path::Path;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let keep_all = GlobFilter::build(root, &[]).expect("empty");
+        assert!(keep_all.keep(Path::new("a.rs")));
+        let rs_only = GlobFilter::build(root, &["*.rs".to_owned()]).expect("glob");
+        assert!(rs_only.keep(&root.join("a.rs")));
+        assert!(!rs_only.keep(&root.join("a.txt")));
+        let not_target = GlobFilter::build(root, &["!target/*".to_owned()]).expect("neg");
+        assert!(not_target.keep(&root.join("src/a.rs")));
+        assert!(!not_target.keep(&root.join("target/a.rs")));
     }
 }
