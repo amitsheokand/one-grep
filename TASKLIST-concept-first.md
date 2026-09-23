@@ -10,9 +10,9 @@ actually care about.
 
 | # | Packet | Status | Gate |
 | --- | --- | --- | --- |
-| 0.1 | `og-license` — add LICENSE file matching README (Apache-2.0); fix empty package description | **Open** | `LICENSE` present; `cargo metadata` description non-empty |
-| 0.2 | `og-version` — clap `version` attr so `one-grep --version` prints the Cargo version; tag `v0.1.0` | **Open** | `--version` output == `git describe`; tag pushed |
-| 0.3 | `og-agent-install` — 20-line README block: `cargo install --git …` or prebuilt binary + `install --target …` + first `index`/`embed` | **Open** | fresh-machine walkthrough in README, no skill folder needed |
+| 0.1 | `og-license` — add LICENSE file matching README (Apache-2.0); fix empty package description | **Done** (`LICENSE`, tag `v0.1.0`; Cargo description was already non-empty) | `LICENSE` present; `cargo metadata` description non-empty |
+| 0.2 | `og-version` — clap `version` attr so `one-grep --version` prints the Cargo version; tag `v0.1.0` | **Done** | `--version` output == `git describe`; tag pushed |
+| 0.3 | `og-agent-install` — 20-line README block: `cargo install --git …` or prebuilt binary + `install --target …` + first `index`/`embed` | **Done** | fresh-machine walkthrough in README, no skill folder needed |
 
 ## Phase 1 — Measure, then route (concept search before flags)
 
