@@ -259,6 +259,23 @@ Not pursued: tuning fusion constants against 4 queries (overfit
 territory, per Run 5 discipline). Each direction above gets its own
 gate check (v2 paraphrase floor + Run 9 re-run) before merging.
 
+## Run 12 fix verified — header chunks (2026-09-24)
+
+Implemented: leading `#` / `//` comment blocks become `(header)`
+`Section` chunks (capped at 30 lines; Markdown excluded, shebangs
+skipped), plus an extractor version marker (`.one-grep/extract.version`)
+so chunking upgrades force a full re-extract — old indexes report
+`index: stale` instead of silently missing new chunk types. Chunk IDs of
+unchanged content are stable, so vectors stay incremental.
+
+Live on the Run 9 workspace: reindex auto-triggered by the version
+mismatch (217 upserted, 2929 → 3090 chunks, +5.5%); "never both" went
+from absent-in-top-50 to lexical #4 (`mlx-lane.nix:1-5 [(header)]`) and
+hybrid #6. Incremental embed for the 184 new chunks took seconds
+(20/s), not minutes. Recall@3 still misses (#4, behind test-file false
+friends) — the corpus gap is closed; what remains is ranking, for the
+RRF-spread experiment next.
+
 ## Run 11 — intent paths on the frozen v2 fixture (2026-09-24)
 
 `ideasearch-v2`: 12 cases (3 keyword / 3 paraphrase / 2 symbol /

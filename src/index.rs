@@ -27,6 +27,25 @@ const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 const WRITER_HEAP: usize = 50_000_000;
 /// Manifest filename inside the index dir.
 const MANIFEST: &str = "manifest.json";
+/// Extractor version marker inside the index dir.
+const EXTRACT_VERSION_FILE: &str = "extract.version";
+
+/// Whether the index was built by the current extractor. Missing or
+/// mismatched markers mean chunking rules changed since indexing.
+#[must_use]
+pub fn extractor_current(workspace: &Path) -> bool {
+    std::fs::read_to_string(engine::index_dir(workspace).join(EXTRACT_VERSION_FILE))
+        .map(|v| v.trim() == extract::EXTRACT_VERSION)
+        .unwrap_or(false)
+}
+
+fn stamp_extractor(workspace: &Path) -> Result<(), Error> {
+    std::fs::write(
+        engine::index_dir(workspace).join(EXTRACT_VERSION_FILE),
+        format!("{}\n", extract::EXTRACT_VERSION),
+    )?;
+    Ok(())
+}
 
 /// One ranked chunk hit.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -147,6 +166,12 @@ pub fn sync(workspace: &Path) -> Result<Stats, Error> {
     let mut writer = index.writer(WRITER_HEAP)?;
 
     let mut manifest = load_manifest(workspace)?;
+    // Extractor upgrade: chunking rules changed, so mtime matches no
+    // longer prove chunks are current. Re-extract everything; chunk IDs
+    // of unchanged content are stable, so vectors stay incremental.
+    if !extractor_current(workspace) {
+        manifest.clear();
+    }
     let mut seen = Vec::new();
     let mut stats = Stats::default();
 
@@ -221,6 +246,7 @@ pub fn sync(workspace: &Path) -> Result<Stats, Error> {
 
     writer.commit()?;
     save_manifest(workspace, &manifest)?;
+    stamp_extractor(workspace)?;
     Ok(stats)
 }
 
@@ -233,11 +259,14 @@ pub fn is_indexed(workspace: &Path) -> bool {
 /// Whether the index no longer matches the tree: any walked file whose
 /// (mtime, len) differs from the manifest, or any manifest entry with no
 /// file behind it. A missing manifest is not "stale" — callers already
-/// report that case as unindexed.
+/// report that case as unindexed. An extractor upgrade is stale too.
 #[must_use]
 pub fn is_stale(workspace: &Path) -> bool {
     if !manifest_path(workspace).exists() {
         return false;
+    }
+    if !extractor_current(workspace) {
+        return true;
     }
     let manifest = match load_manifest(workspace) {
         Ok(m) => m,
@@ -406,6 +435,22 @@ mod tests {
         assert!(!is_indexed(dir.path()));
         sync(dir.path()).expect("sync");
         assert!(is_indexed(dir.path()));
+    }
+
+    #[test]
+    fn extractor_upgrade_forces_full_reindex() {
+        let dir = workspace_with(&[("a.txt", "alpha\n"), ("b.txt", "beta\n")]);
+        sync(dir.path()).expect("sync");
+        assert!(extractor_current(dir.path()));
+        // Simulate an index built by older chunking rules.
+        std::fs::write(engine::index_dir(dir.path()).join("extract.version"), "0\n")
+            .expect("tamper");
+        assert!(!extractor_current(dir.path()));
+        assert!(is_stale(dir.path()));
+        let stats = sync(dir.path()).expect("resync");
+        assert_eq!(stats.upserted, 2);
+        assert!(extractor_current(dir.path()));
+        assert!(!is_stale(dir.path()));
     }
 
     #[test]

@@ -8,6 +8,11 @@ use std::path::{Path, PathBuf};
 
 use crate::Error;
 
+/// Extractor version. Bump when chunking rules change; the index sync
+/// treats a mismatch as a full reindex (chunk IDs of unchanged content
+/// stay stable, so vectors re-embed incrementally).
+pub const EXTRACT_VERSION: &str = "1";
+
 /// How a chunk was derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChunkKind {
@@ -82,12 +87,58 @@ pub type Window = (usize, usize);
 pub const DEFAULT_WINDOW: Window = (150, 135);
 /// Tight fallback window for embedding: 50 lines, 10 overlap.
 pub const EMBED_WINDOW: Window = (50, 40);
+/// File-header comment blocks longer than this are cut: license boilerplate
+/// is searchable enough in its first lines (Run 12: headers must exist,
+/// but need not be whole).
+pub const HEADER_CAP_LINES: usize = 30;
+
+/// Leading `#` / `//` comment block as its own chunk (Run 12: file-header
+/// prose like "Exclusive MLX lane switcher" otherwise vanishes — symbol
+/// extractors only attach comments to bindings). Skips shebangs and blank
+/// preamble; Markdown is excluded (headings are content there).
+fn header_chunk(path: &Path, text: &str, extension: &str) -> Option<Chunk> {
+    let marker: &str = match extension {
+        "rs" | "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "go" | "java" => "//",
+        "py" | "nix" | "sh" | "bash" | "zsh" => "#",
+        _ => return None,
+    };
+    let lines: Vec<&str> = text.lines().collect();
+    let mut first = None;
+    let mut last = 0;
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with("#!") {
+            continue;
+        }
+        if trimmed.starts_with(marker) {
+            if first.is_none() {
+                first = Some(i);
+            }
+            last = i;
+            continue;
+        }
+        break;
+    }
+    let start = first?;
+    let end = last.min(start + HEADER_CAP_LINES - 1);
+    Some(Chunk {
+        path: path.to_path_buf(),
+        start: start as u64 + 1,
+        end: end as u64 + 1,
+        kind: ChunkKind::Section,
+        breadcrumb: "(header)".to_owned(),
+        text: lines[start..=end].join("\n"),
+    })
+}
 
 /// Extract with an explicit fallback window (symbols/sections unaffected).
 #[must_use]
 pub fn extract_with(path: &Path, text: &str, window: Window) -> Vec<Chunk> {
     let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    match extension {
+    let mut chunks = match extension {
         "rs" => symbols(
             path,
             text,
@@ -173,7 +224,11 @@ pub fn extract_with(path: &Path, text: &str, window: Window) -> Vec<Chunk> {
         "md" | "markdown" => sections(path, text),
         "nix" => nix_symbols(path, text, window),
         _ => windows(path, text, window),
+    };
+    if let Some(header) = header_chunk(path, text, extension) {
+        chunks.insert(0, header);
     }
+    chunks
 }
 
 fn node_text<'b>(node: tree_sitter::Node<'_>, bytes: &'b [u8]) -> &'b str {
@@ -477,6 +532,58 @@ mod tests {
         let names: Vec<&str> = chunks.iter().map(|c| c.breadcrumb.as_str()).collect();
         assert!(names.contains(&"Config"), "{names:?}");
         assert!(names.contains(&"Apply"), "{names:?}");
+    }
+
+    #[test]
+    fn header_comment_becomes_own_chunk() {
+        let text = "# Exclusive MLX lane switcher.\n{ pkgs }: {\n  name = \"x\";\n}\n";
+        let chunks = extract(Path::new("lane.nix"), text);
+        let header = chunks
+            .iter()
+            .find(|c| c.breadcrumb == "(header)")
+            .expect("header chunk");
+        assert_eq!((header.start, header.end), (1, 1));
+        assert!(header.text.contains("Exclusive"));
+        assert_eq!(header.kind, ChunkKind::Section);
+    }
+
+    #[test]
+    fn header_skips_shebang_and_blank_preamble() {
+        let text = "#!/usr/bin/env python3\n\n# Real header.\nimport os\n";
+        let chunks = extract(Path::new("a.py"), text);
+        let header = chunks
+            .iter()
+            .find(|c| c.breadcrumb == "(header)")
+            .expect("header chunk");
+        assert_eq!((header.start, header.end), (3, 3));
+        assert!(!header.text.contains("usr/bin"));
+    }
+
+    #[test]
+    fn header_absent_without_leading_comments() {
+        let chunks = extract(Path::new("a.py"), "import os\n");
+        assert!(chunks.iter().all(|c| c.breadcrumb != "(header)"));
+    }
+
+    #[test]
+    fn header_caps_long_boilerplate() {
+        let mut text = String::new();
+        for i in 0..40 {
+            text.push_str(&format!("# license line {i}\n"));
+        }
+        text.push_str("x = 1\n");
+        let chunks = extract(Path::new("a.nix"), &text);
+        let header = chunks
+            .iter()
+            .find(|c| c.breadcrumb == "(header)")
+            .expect("header chunk");
+        assert_eq!((header.start, header.end), (1, HEADER_CAP_LINES as u64));
+    }
+
+    #[test]
+    fn markdown_has_no_header_chunk() {
+        let chunks = extract(Path::new("a.md"), "# Title\n\nbody\n");
+        assert!(chunks.iter().all(|c| c.breadcrumb != "(header)"));
     }
 
     #[test]

@@ -18,8 +18,9 @@ Crate/binary name: **`one-grep`**. License: Apache-2.0. MSRV: Rust 1.85.
   include globs (`!` negates). `--json` emits a `[{path,line,text}]`
   array. Limit 1–500, default 100.
 * **Indexed lexical search** (`index` + `query`): tree-sitter chunking
-  (Rust/Python/TypeScript/Go/Java/Nix symbols, Markdown sections, sliding
-  windows, 2-hop call-chains) into a tantivy BM25 index under
+  (Rust/Python/TypeScript/Go/Java/Nix symbols, file-header comment blocks,
+  Markdown sections, sliding windows, 2-hop call-chains) into a tantivy
+  BM25 index under
   `<workspace>/.one-grep/`.
   Lexical window is 150 lines / 135 step; vector window is 50 / 40.
 * **Hybrid retrieval** (`--hybrid`): MiniLM-class ONNX embeddings run
