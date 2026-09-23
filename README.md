@@ -125,7 +125,7 @@ pool, `rg` for exact text/symbols/regex. Cite `path:line` evidence.
 | `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score) source=bm25\|vec\|bm25+vec\|rg` chunks (text capped, 1-line crumb); `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set; single tokens go BM25 |
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
-| `rg` | `root*`, `pattern*`, `regex?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `limit?=100` (1–500) | `path:line:text` lines, gitignore-aware |
+| `rg` | `root*`, `pattern*`, `regex?=false`, `structural?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `format?=text`, `limit?=100` (1–500) | `path:line:text` lines (or `{"notes","hits"}` with `format=json`), gitignore-aware |
 
 ## Install targets
 
@@ -171,6 +171,14 @@ Honest substitutes, depending on which half of one-grep you need:
   — same BM25+vector idea, ~250 ms
   per query in our bench vs ~70–200 ms for one-grep hybrid. one-grep is
   the faster native port with the in-tree MCP server.
+* **Structural search over MCP**: [ast-grep-mcp](https://github.com/ast-grep/ast-grep-mcp)
+  — the ast-grep team's own MCP server. Use it side-by-side when agents
+  need deep structural rules; use one-grep's `search` for intent and
+  `rg --structural` for one-off shape queries.
+* **Combined engines**: [`ox-core`](https://crates.io/crates/ox-core)
+  (`ox-codes`) — ripgrep + tree-sitter + ast-grep as an HTTP service
+  with rewrite and dataflow analysis. Heavier than one-grep; pick it
+  when you need rewrite/codemod, not just retrieval.
 * **Jev ranking backend**: the default is the hosted
   [TypeSafe Jev API](https://typesafe.ai/) (`TYPESAFE_API_KEY`). Local
   options speak the same `POST /v1/systemone` wire protocol, selectable

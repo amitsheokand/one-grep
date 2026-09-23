@@ -18,6 +18,7 @@ use std::{
 };
 
 use lsp_types::{GotoDefinitionResponse, Location, LocationLink};
+use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -60,7 +61,7 @@ impl Default for Options {
 
 /// One navigation hit. Lines are 1-based; characters stay LSP UTF-16
 /// offsets and are only used for display.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Target {
     /// Absolute file path.
     pub path: PathBuf,

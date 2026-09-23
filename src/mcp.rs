@@ -24,6 +24,35 @@ use serde::Deserialize;
 /// Max chars of chunk text per tool hit.
 const TEXT_CAP: usize = 1200;
 
+/// Output format for MCP tools. `text` (default) is the citable
+/// `path:line` rendering; `json` returns
+/// `{"notes": [...], "hits": [...]}` for machine parsing — robust against
+/// paths containing `:` that break line splitting. Budget caps apply to
+/// both: format never widens the result set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum Format {
+    Text,
+    Json,
+}
+
+impl Format {
+    fn opt(raw: Option<Format>) -> Self {
+        raw.unwrap_or(Self::Text)
+    }
+
+    fn envelope<T: serde::Serialize>(&self, notes: &[String], hits: &T) -> Option<String> {
+        match self {
+            Self::Text => None,
+            Self::Json => Some(serde_json::json!({"notes": notes, "hits": hits}).to_string()),
+        }
+    }
+}
+
+fn text_block(text: String) -> CallToolResult {
+    CallToolResult::success(vec![ContentBlock::text(text)])
+}
+
 fn check_root(root: &str) -> Result<PathBuf, McpError> {
     let path = PathBuf::from(root);
     if !path.is_absolute() {
@@ -130,6 +159,8 @@ struct SearchParams {
     lang: Option<Vec<String>>,
     /// Restrict hits to ignore-style globs (whitelist, `!` negates).
     globs: Option<Vec<String>>,
+    /// Output format: `text` (default) or `json` (`{"notes","hits"}`).
+    format: Option<Format>,
     /// Structural pattern fused as a third RRF list (needs `ast_lang` and
     /// the `ast-grep` binary on PATH). Applies to hybrid retrieval.
     ast_pattern: Option<String>,
@@ -151,6 +182,8 @@ struct DefinitionParams {
     character: u32,
     /// Server command override (default `rust-analyzer` from PATH).
     server: Option<String>,
+    /// Output format: `text` (default) or `json` (`{"notes","hits"}`).
+    format: Option<Format>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -173,6 +206,8 @@ struct RgParams {
     lang: Option<Vec<String>>,
     /// Restrict to ignore-style globs (whitelist, `!` negates).
     globs: Option<Vec<String>>,
+    /// Output format: `text` (default) or `json` (`{"notes","hits"}`).
+    format: Option<Format>,
     /// Max hits (default 100, max 500).
     limit: Option<usize>,
 }
@@ -203,6 +238,7 @@ impl OneGrep {
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
+        let format = Format::opt(p.format);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
         let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
         match route::route(&p.query, fts) {
@@ -216,6 +252,7 @@ impl OneGrep {
                         case_insensitive: Some(false),
                         lang: p.lang.clone(),
                         globs: p.globs.clone(),
+                        format: p.format,
                         limit: Some(limit),
                     }))
                     .await;
@@ -223,26 +260,36 @@ impl OneGrep {
             route::Route::Identifier(term) => {
                 // Exact beats fuzzy: single tokens go BM25, never hybrid.
                 let indexed_now = index::is_indexed(&root);
-                let lines: Vec<String> = if indexed_now {
-                    lexical(&root, &term, limit, &filter)?
-                } else {
-                    rg_fallback_lines(&root, &term, limit, &filter)?
-                };
-                let body = lines.join("\n---\n");
                 let mut notes = Vec::new();
                 if indexed_now && index::is_stale(&root) {
                     notes.push(index::stale_note(&root));
                 }
-                let text = if indexed_now {
-                    if notes.is_empty() {
+                if !indexed_now {
+                    notes.push(rg::unindexed_note(&root));
+                }
+                if indexed_now {
+                    let mut hits = index::search(&root, &term, limit).map_err(internal)?;
+                    hits.retain(|h| filter.keep(&h.path));
+                    if let Some(envelope) = format.envelope(&notes, &hits) {
+                        return Ok(text_block(envelope));
+                    }
+                    let lines: Vec<String> = hits.iter().map(render_ranked).collect();
+                    let body = lines.join("\n---\n");
+                    let text = if notes.is_empty() {
                         body
                     } else {
                         format!("{}\n\n{body}", notes.join("\n"))
-                    }
-                } else {
-                    format!("{}\n\n{body}", rg::unindexed_note(&root))
-                };
-                return Ok(CallToolResult::success(vec![ContentBlock::text(text)]));
+                    };
+                    return Ok(text_block(text));
+                }
+                let mut hits = rg::fallback_search(&root, &term, limit).map_err(internal)?;
+                hits.retain(|h| filter.keep(&h.path));
+                if let Some(envelope) = format.envelope(&notes, &hits) {
+                    return Ok(text_block(envelope));
+                }
+                let lines: Vec<String> = hits.iter().map(render_live).collect();
+                let body = lines.join("\n---\n");
+                return Ok(text_block(format!("{}\n\n{body}", notes.join("\n"))));
             }
             route::Route::Intent(_) => {}
         }
@@ -294,12 +341,7 @@ impl OneGrep {
             fuse::apply_ast(&mut fused, &refs);
             fused.truncate(limit);
         }
-        let lines: Vec<String> = fused
-            .iter()
-            .filter(|h| filter.keep(&h.path))
-            .map(render_fused)
-            .collect();
-        let body = lines.join("\n---\n");
+        fused.retain(|h| filter.keep(&h.path));
         let mut notes = Vec::new();
         if indexed && index::is_stale(&root) {
             notes.push(index::stale_note(&root));
@@ -307,16 +349,20 @@ impl OneGrep {
         if used_vectors && crate::vectors::is_stale(&root) {
             notes.push(crate::vectors::stale_note(&root));
         }
-        let text = if indexed {
-            if notes.is_empty() {
-                body
-            } else {
-                format!("{}\n\n{body}", notes.join("\n"))
-            }
+        if !indexed {
+            notes.push(rg::unindexed_note(&root));
+        }
+        if let Some(envelope) = format.envelope(&notes, &fused) {
+            return Ok(text_block(envelope));
+        }
+        let lines: Vec<String> = fused.iter().map(render_fused).collect();
+        let body = lines.join("\n---\n");
+        let text = if notes.is_empty() {
+            body
         } else {
-            format!("{}\n\n{body}", rg::unindexed_note(&root))
+            format!("{}\n\n{body}", notes.join("\n"))
         };
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        Ok(text_block(text))
     }
 
     #[tool(
@@ -328,6 +374,7 @@ impl OneGrep {
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
+        let format = Format::opt(p.format);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
         let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
         let cls = route::route(&p.query, fts);
@@ -341,6 +388,7 @@ impl OneGrep {
                     case_insensitive: Some(false),
                     lang: p.lang.clone(),
                     globs: p.globs.clone(),
+                    format: p.format,
                     limit: Some(limit),
                 }))
                 .await;
@@ -405,11 +453,6 @@ impl OneGrep {
         .await
         .map_err(|e| internal(e.to_string()))?
         .map_err(internal)?;
-        let body = hits
-            .iter()
-            .map(render_fused)
-            .collect::<Vec<_>>()
-            .join("\n---\n");
         let mut notes = vec![status.note.clone()];
         if indexed && index::is_stale(&root) {
             notes.push(index::stale_note(&root));
@@ -420,6 +463,14 @@ impl OneGrep {
         if !indexed {
             notes.push(rg::unindexed_note(&root));
         }
+        if let Some(envelope) = format.envelope(&notes, &hits) {
+            return Ok(text_block(envelope));
+        }
+        let body = hits
+            .iter()
+            .map(render_fused)
+            .collect::<Vec<_>>()
+            .join("\n---\n");
         let text = format!("{}\n\n{body}", notes.join("\n"));
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
@@ -448,13 +499,21 @@ impl OneGrep {
         let targets = lsp::definition(&options, &root, &file, p.line, p.character)
             .await
             .map_err(internal)?;
+        let format = Format::opt(p.format);
         if targets.is_empty() {
-            return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+            let note = format!(
                 "no definition found at {}:{}:{} (rust-analyzer)",
                 file.display(),
                 p.line,
                 p.character
-            ))]));
+            );
+            if let Some(envelope) = format.envelope(&[note.clone()], &Vec::<lsp::Target>::new()) {
+                return Ok(text_block(envelope));
+            }
+            return Ok(text_block(note));
+        }
+        if let Some(envelope) = format.envelope(&[], &targets) {
+            return Ok(text_block(envelope));
         }
         let lines: Vec<String> = targets
             .iter()
@@ -472,9 +531,7 @@ impl OneGrep {
                 )
             })
             .collect();
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            lines.join("\n"),
-        )]))
+        Ok(text_block(lines.join("\n")))
     }
 
     #[tool(
@@ -482,6 +539,7 @@ impl OneGrep {
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
+        let format = Format::opt(p.format);
         if p.structural.unwrap_or(false) {
             if p.regex.unwrap_or(false) {
                 return Err(McpError::invalid_params(
@@ -503,8 +561,11 @@ impl OneGrep {
                 ));
             }
             let limit = p.limit.unwrap_or(100).clamp(1, 500);
-            let lines: Vec<String> = crate::astg::search(&root, &p.pattern, lang, limit)
-                .map_err(rg_error)?
+            let hits = crate::astg::search(&root, &p.pattern, lang, limit).map_err(rg_error)?;
+            if let Some(envelope) = format.envelope(&[], &hits) {
+                return Ok(text_block(envelope));
+            }
+            let lines: Vec<String> = hits
                 .iter()
                 .map(|h| {
                     format!(
@@ -515,9 +576,7 @@ impl OneGrep {
                     )
                 })
                 .collect();
-            return Ok(CallToolResult::success(vec![ContentBlock::text(
-                lines.join("\n"),
-            )]));
+            return Ok(text_block(lines.join("\n")));
         }
         let options = rg::Options {
             regex: p.regex.unwrap_or(false),
@@ -526,14 +585,15 @@ impl OneGrep {
             langs: p.lang.unwrap_or_default(),
             limit: p.limit.unwrap_or(100).clamp(1, 500),
         };
-        let lines: Vec<String> = rg::search(&root, &p.pattern, &options)
-            .map_err(rg_error)?
+        let hits = rg::search(&root, &p.pattern, &options).map_err(rg_error)?;
+        if let Some(envelope) = format.envelope(&[], &hits) {
+            return Ok(text_block(envelope));
+        }
+        let lines: Vec<String> = hits
             .iter()
             .map(|h| format!("{}:{}:{}", h.path.display(), h.line, h.text))
             .collect();
-        Ok(CallToolResult::success(vec![ContentBlock::text(
-            lines.join("\n"),
-        )]))
+        Ok(text_block(lines.join("\n")))
     }
 }
 
@@ -541,34 +601,6 @@ impl Default for OneGrep {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn lexical(
-    root: &Path,
-    query: &str,
-    limit: usize,
-    filter: &HitFilter,
-) -> Result<Vec<String>, McpError> {
-    Ok(index::search(root, query, limit)
-        .map_err(internal)?
-        .iter()
-        .filter(|h| filter.keep(&h.path))
-        .map(render_ranked)
-        .collect())
-}
-
-fn rg_fallback_lines(
-    root: &Path,
-    query: &str,
-    limit: usize,
-    filter: &HitFilter,
-) -> Result<Vec<String>, McpError> {
-    Ok(rg::fallback_search(root, query, limit)
-        .map_err(internal)?
-        .iter()
-        .filter(|h| filter.keep(&h.path))
-        .map(render_live)
-        .collect())
 }
 
 /// Post-retrieval `--lang` / `--glob` filter for `search` hits.
@@ -735,6 +767,7 @@ mod tests {
                     globs: None,
                     ast_pattern: None,
                     ast_lang: None,
+                    format: None,
                     limit: None,
                 })))
                 .expect("search");
@@ -767,6 +800,7 @@ mod tests {
                     globs: None,
                     ast_pattern: None,
                     ast_lang: None,
+                    format: None,
                     limit: None,
                 }))
                 .await
@@ -791,6 +825,7 @@ mod tests {
                 globs: None,
                 ast_pattern: None,
                 ast_lang: None,
+                format: None,
                 limit: Some(5),
             }))
             .await
@@ -828,6 +863,7 @@ mod tests {
                 line: 1,
                 character: 1,
                 server: None,
+                format: None,
             }))
             .await
             .expect_err("escape must fail");
@@ -839,6 +875,7 @@ mod tests {
                 line: 0,
                 character: 1,
                 server: None,
+                format: None,
             }))
             .await
             .expect_err("line 0 must fail");
@@ -856,6 +893,7 @@ mod tests {
                 line: 1,
                 character: 1,
                 server: Some("one-grep-definitely-no-such-server".into()),
+                format: None,
             }))
             .await
             .expect_err("missing server must fail");
@@ -885,6 +923,7 @@ mod tests {
                     globs: None,
                     ast_pattern: None,
                     ast_lang: None,
+                    format: None,
                     limit: None,
                 }))
                 .await
@@ -942,6 +981,7 @@ mod tests {
                 case_insensitive: None,
                 lang: Some(vec!["rust".into()]),
                 globs: None,
+                format: None,
                 limit: None,
             }))
             .await
@@ -960,6 +1000,7 @@ mod tests {
                 case_insensitive: None,
                 lang: Some(vec!["cobol".into()]),
                 globs: None,
+                format: None,
                 limit: None,
             }))
             .await
@@ -1006,6 +1047,7 @@ mod tests {
                 globs: None,
                 ast_pattern: None,
                 ast_lang: None,
+                format: None,
                 limit: Some(5),
             }))
             .await
@@ -1057,6 +1099,7 @@ mod tests {
                 globs: None,
                 ast_pattern: None,
                 ast_lang: None,
+                format: None,
                 limit: None,
             }))
             .await
@@ -1075,6 +1118,7 @@ mod tests {
                 globs: None,
                 ast_pattern: None,
                 ast_lang: None,
+                format: None,
                 limit: None,
             }))
             .await
@@ -1106,6 +1150,7 @@ mod tests {
                 globs: None,
                 ast_pattern: None,
                 ast_lang: None,
+                format: None,
                 limit: Some(3),
             }))
             .await
@@ -1171,6 +1216,7 @@ mod tests {
                 case_insensitive: None,
                 lang: Some(vec!["rust".into()]),
                 globs: None,
+                format: None,
                 limit: None,
             }))
             .await
@@ -1210,6 +1256,7 @@ mod tests {
                 globs: None,
                 ast_pattern: Some("fn $F".into()),
                 ast_lang: Some("rust".into()),
+                format: None,
                 limit: None,
             }))
             .await
@@ -1234,11 +1281,97 @@ mod tests {
                 globs: None,
                 ast_pattern: Some("fn $F".into()),
                 ast_lang: Some("rust".into()),
+                format: None,
                 limit: None,
             }))
             .await
             .expect_err("absent ast-grep must fail");
         unpoint_ast_grep();
         assert!(err.message.contains("ast-grep"), "{err:?}");
+    }
+
+    /// `format=json` returns a machine envelope on every tool; text stays
+    /// the default. Notes ride along so nothing agents rely on is lost.
+    #[tokio::test]
+    async fn format_json_envelope_round_trips() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.rs"), "jsonprobe_token here\n").expect("fixture");
+        crate::index::sync(workspace.path()).expect("sync");
+        let root = workspace.path().to_string_lossy().into_owned();
+        // search (identifier path): notes + typed hits.
+        let result = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root: root.clone(),
+                query: "jsonprobe_token".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: None,
+                globs: None,
+                ast_pattern: None,
+                ast_lang: None,
+                format: Some(Format::Json),
+                limit: None,
+            }))
+            .await
+            .expect("search json");
+        let text = serde_json::to_value(result).expect("response");
+        let envelope: serde_json::Value =
+            serde_json::from_str(text["content"][0]["text"].as_str().unwrap())
+                .expect("envelope parses");
+        assert_eq!(envelope["hits"].as_array().unwrap().len(), 1);
+        assert!(
+            envelope["hits"][0]["path"]
+                .as_str()
+                .unwrap()
+                .ends_with("a.rs")
+        );
+        // rg: same envelope, line hits.
+        let result = OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: root.clone(),
+                pattern: "jsonprobe_token".into(),
+                regex: None,
+                structural: None,
+                case_insensitive: None,
+                lang: None,
+                globs: None,
+                format: Some(Format::Json),
+                limit: None,
+            }))
+            .await
+            .expect("rg json");
+        let text = serde_json::to_value(result).expect("response");
+        let envelope: serde_json::Value =
+            serde_json::from_str(text["content"][0]["text"].as_str().unwrap())
+                .expect("envelope parses");
+        assert_eq!(envelope["hits"][0]["line"], 1);
+        // search_ranked offline: rank note preserved inside the envelope.
+        let result = OneGrep::new()
+            .search_ranked(Parameters(SearchParams {
+                root: root.clone(),
+                query: "jsonprobe_token prose documentation".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: None,
+                globs: None,
+                ast_pattern: None,
+                ast_lang: None,
+                format: Some(Format::Json),
+                limit: Some(5),
+            }))
+            .await
+            .expect("ranked json");
+        let text = serde_json::to_value(result).expect("response");
+        let envelope: serde_json::Value =
+            serde_json::from_str(text["content"][0]["text"].as_str().unwrap())
+                .expect("envelope parses");
+        assert!(
+            envelope["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|n| n.as_str().unwrap().contains("rank:")),
+            "{envelope}"
+        );
     }
 }
