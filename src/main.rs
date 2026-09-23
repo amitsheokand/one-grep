@@ -133,6 +133,28 @@ fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("")
 }
 
+/// Run fused hybrid retrieval plus optional structural fusion. Free
+/// function (not a closure) so `spawn_blocking` can own it.
+fn run_hybrid(
+    provider: one_grep::embed::FastembedProvider,
+    reranker: Option<Box<dyn one_grep::embed::Rerank>>,
+    path: std::path::PathBuf,
+    query: String,
+    limit: usize,
+    ast: Option<String>,
+    ast_lang: Option<String>,
+) -> Result<Vec<one_grep::fuse::FusedHit>> {
+    let mut hits = one_grep::fuse::hybrid(
+        &path,
+        &query,
+        limit,
+        Some(&provider),
+        reranker.as_deref(),
+    )?;
+    fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
+    Ok(hits)
+}
+
 /// Fuse `--ast` structural hits as a third RRF list. No-op without `--ast`.
 fn fuse_ast(
     path: &std::path::Path,
@@ -370,32 +392,42 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             if hybrid || rank_local {
-                let provider = match one_grep::vectors::store_model(&path)? {
-                    Some(name) => one_grep::embed::FastembedProvider::load_model(
-                        one_grep::embed::OnnxModel::parse_stored(&name)?,
-                    )?,
-                    None => one_grep::embed::FastembedProvider::load()?,
-                };
                 let jina = backend == Some(RankKind::Jina);
-                let reranker: Option<Box<dyn one_grep::embed::Rerank>> = if jina {
-                    Some(Box::new(one_grep::embed::JinaReranker::load()?))
-                } else if backend == Some(RankKind::Llama) {
-                    let llama = match &rank_endpoint {
-                        Some(url) => one_grep::embed::LlamaReranker::from_url(url)?,
-                        None => one_grep::embed::LlamaReranker::from_env()?,
-                    };
-                    Some(Box::new(llama))
+                let use_llama = backend == Some(RankKind::Llama);
+                let mut hits = if use_llama {
+                    let path = path.clone();
+                    let query = query.clone();
+                    let rank_endpoint = rank_endpoint.clone();
+                    let ast = ast.clone();
+                    let ast_lang = ast_lang.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let provider = match one_grep::vectors::store_model(&path)? {
+                            Some(name) => one_grep::embed::FastembedProvider::load_model(
+                                one_grep::embed::OnnxModel::parse_stored(&name)?,
+                            )?,
+                            None => one_grep::embed::FastembedProvider::load()?,
+                        };
+                        let llama = match &rank_endpoint {
+                            Some(url) => one_grep::embed::LlamaReranker::from_url(url)?,
+                            None => one_grep::embed::LlamaReranker::from_env()?,
+                        };
+                        run_hybrid(provider, Some(Box::new(llama)), path, query, limit, ast, ast_lang)
+                    })
+                    .await??
                 } else {
-                    None
+                    let provider = match one_grep::vectors::store_model(&path)? {
+                        Some(name) => one_grep::embed::FastembedProvider::load_model(
+                            one_grep::embed::OnnxModel::parse_stored(&name)?,
+                        )?,
+                        None => one_grep::embed::FastembedProvider::load()?,
+                    };
+                    let reranker: Option<Box<dyn one_grep::embed::Rerank>> = if jina {
+                        Some(Box::new(one_grep::embed::JinaReranker::load()?))
+                    } else {
+                        None
+                    };
+                    run_hybrid(provider, reranker, path.clone(), query.clone(), limit, ast.clone(), ast_lang.clone())?
                 };
-                let mut hits = one_grep::fuse::hybrid(
-                    &path,
-                    &query,
-                    limit,
-                    Some(&provider),
-                    reranker.as_deref(),
-                )?;
-                fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
                 if json {
                     if one_grep::index::is_stale(&path) {
                         eprintln!("{}", one_grep::index::stale_note(&path));

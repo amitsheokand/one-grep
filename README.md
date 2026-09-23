@@ -100,7 +100,10 @@ Notes:
   (llama.cpp server with `--rerank`, e.g. `bge-reranker-v2-m3` on Vulkan;
   endpoint `ONE_GREP_RERANK_URL` or `--rank-endpoint`, default
   `http://127.0.0.1:8080`). Load or endpoint failures fall back to
-  retrieval order, never an error.
+  retrieval order, never an error. Serve it with:
+  `llama-server -m bge-reranker-v2-m3-Q8_0.gguf --embedding --pooling rank`
+  (add `--device Vulkan` / `--n-gpu-layers all` on AMD; CPU works but a
+  20-doc pool takes tens of seconds).
 * `rg` is literal unless `--regex`. `query --rank jev` needs
   `TYPESAFE_API_KEY` (else `~/.config/typesafe.env`), model
   `JEV_MCP_MODEL` default `jev-1.13.0`; without a key it emits a

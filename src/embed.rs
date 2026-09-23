@@ -444,8 +444,9 @@ impl Rerank for JinaReranker {
 pub const ENV_RERANK_URL: &str = "ONE_GREP_RERANK_URL";
 /// llama-server default port.
 pub const DEFAULT_RERANK_URL: &str = "http://127.0.0.1:8080";
-/// HTTP budget per rerank call.
-const RERANK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// HTTP budget per rerank call. Generous: CPU-backed servers need tens
+/// of seconds for a 20-doc pool (Vulkan does it in seconds).
+const RERANK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Cross-encoder over HTTP: a llama.cpp server started with `--rerank`
 /// (e.g. `bge-reranker-v2-m3`, ideally Vulkan-offloaded). Speaks the

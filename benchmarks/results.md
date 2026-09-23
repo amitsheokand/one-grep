@@ -276,6 +276,38 @@ hybrid #6. Incremental embed for the 184 new chunks took seconds
 friends) — the corpus gap is closed; what remains is ranking, for the
 RRF-spread experiment next.
 
+## Run 13 — bge-reranker-v2-m3 on R9700 Vulkan as `--rank llama` (2026-09-24)
+
+llama-server built from source with `-DGGML_VULKAN=ON` (nix shell:
+cmake, ninja, gcc, gnumake, vulkan-headers, vulkan-loader, shaderc,
+spirv-headers, pkg-config; needed explicit `-DVulkan_*` paths plus
+`-isystem` spirv-headers for `spirv.hpp`). Both GPUs visible
+(iGPU RAPHAEL + R9700 GFX1201); serving on `--device Vulkan1`.
+Model: `gpustack/bge-reranker-v2-m3-GGUF` Q8_0 (636 MB) in
+`~/work/models`, served with `--embedding --pooling rank`. 1-doc
+rerank: 0.77s CPU → 0.16s Vulkan. one-grep side needed one fix: the
+blocking reqwest client cannot even be *built* on the tokio runtime —
+`query --rank llama` now builds + runs inside `spawn_blocking`.
+
+Bake-off (same 10 keyword + 4 concept, `query --rank llama`, ~1.1 s/q):
+
+| set | lex | hyb | jina (Run 9) | **llama (Vulkan)** |
+|---|---|---|---|---|
+| keyword (10) | 7/10 | 8/10 | — | **9/10** |
+| concept (4) | 2/4 | 1/4 | 0/4 | **2/4** |
+
+Per-query concepts: never-both:H (header chunk + cross-encoder agree),
+pretty-prompt:M, save-session:H, no-secrets:M. Keyword: only
+chain-apply misses (reranker prefers a *test* calling `apply_request`
+over its definition — debatable, metric says miss).
+
+Reads: cross-encoders beat Jina everywhere and tie lexical on concepts,
+but `estimate_tokens` still wins no-secrets (scores go negative: the
+model finds nothing fitting). Word sense needs a Noul judge, not a
+stronger ranker — Laya comparison stays open. R9700 Vulkan serving is
+proven for this path; CPU needs ~10 tok/s (≈8 min per 20-doc call),
+hence the 90 s client budget is Vulkan-first.
+
 ## Run 12 find — duplicate chain chunks stacked RRF terms (2026-09-24)
 
 While testing RRF spread, one fused slot showed score 0.1464 for
