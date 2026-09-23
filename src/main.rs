@@ -144,13 +144,8 @@ fn run_hybrid(
     ast: Option<String>,
     ast_lang: Option<String>,
 ) -> Result<Vec<one_grep::fuse::FusedHit>> {
-    let mut hits = one_grep::fuse::hybrid(
-        &path,
-        &query,
-        limit,
-        Some(&provider),
-        reranker.as_deref(),
-    )?;
+    let mut hits =
+        one_grep::fuse::hybrid(&path, &query, limit, Some(&provider), reranker.as_deref())?;
     fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
     Ok(hits)
 }
@@ -411,7 +406,15 @@ async fn main() -> Result<()> {
                             Some(url) => one_grep::embed::LlamaReranker::from_url(url)?,
                             None => one_grep::embed::LlamaReranker::from_env()?,
                         };
-                        run_hybrid(provider, Some(Box::new(llama)), path, query, limit, ast, ast_lang)
+                        run_hybrid(
+                            provider,
+                            Some(Box::new(llama)),
+                            path,
+                            query,
+                            limit,
+                            ast,
+                            ast_lang,
+                        )
                     })
                     .await??
                 } else {
@@ -426,7 +429,15 @@ async fn main() -> Result<()> {
                     } else {
                         None
                     };
-                    run_hybrid(provider, reranker, path.clone(), query.clone(), limit, ast.clone(), ast_lang.clone())?
+                    run_hybrid(
+                        provider,
+                        reranker,
+                        path.clone(),
+                        query.clone(),
+                        limit,
+                        ast.clone(),
+                        ast_lang.clone(),
+                    )?
                 };
                 if json {
                     if one_grep::index::is_stale(&path) {
