@@ -218,3 +218,33 @@ windows-rs + big Rust crates before claiming the win.
 - `watch <path>`: foreground notify-based re-sync, 2 s debounce,
   skips index/build/vcs dirs. Live-verified (burst → single sync).
 - Harness `rg -l` now `--sort path` (deterministic recall).
+
+## Run 9 (2026-09-24): re-run on Linux after quote + plant changes
+
+Same harness (`benchmarks/bench.py`, best-of-3, recall@3), fresh release
+binary with current code. Corpus: same `nixos-config`, now 22M / 217 files
+(2929 chunks fresh-indexed). Index 0.19 s; `embed --model minilm` ~4.5 min
+for 2868 chunks (~11/s). `zg` not installed on this box — zg columns
+skipped. Machine: 60 GB Linux box under concurrent build load, so absolute
+latencies run higher than the September Mac runs; relative order holds.
+
+| keyword (10) | mean ms | recall@3 |
+|---|---|---|
+| rg -l | 2.1 | 8/10 |
+| one-grep lexical | 7.2 | 7/10 |
+| one-grep hybrid (MiniLM) | 207.1 | 8/10 |
+| one-grep rerank (Jina top-20) | 1199.2 | **10/10** |
+
+| concept (4) | mean ms | recall@3 |
+|---|---|---|
+| one-grep lexical | 7.0 | 2/4 |
+| one-grep hybrid | 201.7 | 1/4 |
+| one-grep rerank | 1082.3 | 0/4 |
+
+Reads: rerank still sweeps keywords (10/10) and still adds nothing on
+concepts (0/4) — same shape as Run 8, one machine later. Hybrid beats
+lexical on keywords (8/10 vs 7/10) and trails it on concepts (1/4 vs
+2/4). Hybrid latency here (~200 ms vs ~69–99 ms in September) is box
+noise (loaded CPU, cold caches), not a code regression: the retrieval
+path is unchanged since Run 8; intervening commits touched CLI parsing,
+quote normalization in `rg`, and Jev note text only.

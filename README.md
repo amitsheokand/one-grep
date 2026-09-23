@@ -31,8 +31,9 @@ Crate/binary name: **`one-grep`**. License: Apache-2.0. MSRV: Rust 1.85.
 ## Measured numbers
 
 Harness: `benchmarks/bench.py`, release binary, best-of-3 latency,
-recall@3. Corpus Run 1–4: `nixos-config` copy (13 MB, `.git` excluded).
-`rg -l` file order is nondeterministic, so its recall jitters ±1.
+recall@3. Corpus Runs 1–8: `nixos-config` copy (13 MB, `.git` excluded);
+Run 9: same repo grown to 22 MB / 217 files. `rg -l` file order is
+nondeterministic, so its recall jitters ±1.
 See `benchmarks/results.md` for full runs.
 
 | Query set | one-grep lexical | one-grep hybrid (MiniLM) | `rg -l` | `zg query --human` |
@@ -41,6 +42,8 @@ See `benchmarks/results.md` for full runs.
 | 4 concept paraphrase (Run 3) | 5.4 ms, 1/4 | 69.7 ms, **3/4** | — | 249.8 ms, 1/4 |
 | 10 keyword + chain (Run 8) | 5.4 ms, 6/10 | 99 ms, 7/10 | 5.4 ms, 7/10 | 251 ms, 8/10 |
 | same 10, + Jina rerank top-20 | — | 602 ms, **10/10** | — | — |
+| 10 keyword (Run 9, Linux re-run) | 7.2 ms, 7/10 | 207 ms, 8/10 | 2.1 ms, 8/10 | n/a (not installed) |
+| 4 concept (Run 9) | 7.0 ms, 2/4 | 201.7 ms, 1/4 | — | n/a |
 
 Model trade-off (Run 4, same corpus):
 
@@ -55,7 +58,7 @@ pure-vector held R@1/R@3/R@10 base 0.37/0.52/0.66 → ft2 **0.52/0.67/0.78**.
 Scale case: Hipfire Rust monorepo (127 MB, 1013 `.rs` files) indexes ~40k
 chunks / 46k vectors.
 
-Test suite: `cargo test --lib` — 70 passed, 0 failed (includes `rg`,
+Test suite: `cargo test --lib` — 73 passed, 0 failed (includes `rg`,
 `index`, `fuse`, `vectors`, `mcp`, `lsp`, `eval`).
 
 ## Requirements
@@ -130,6 +133,37 @@ How it is wired on a Pi / Home Manager laptop:
   `Authorization: Bearer <token>`.
 * Only `search_ranked` / `query --rank jev` makes a network call, to the
   configured Jev model; the key is never logged.
+
+## Alternatives
+
+Honest substitutes, depending on which half of one-grep you need:
+
+* **Exact text search**: [ripgrep](https://github.com/BurntSushi/ripgrep) —
+  the baseline. one-grep's `rg` will never beat it on raw latency
+  (Run 9: 2.1 ms vs 7.2 ms); use `rg` when you know the literal text.
+* **Structural search**: [ast-grep](https://github.com/ast-grep/ast-grep)
+  (Rust, tree-sitter) — matches AST shape instead of text
+  (`$A && $A()` patterns, rewrite rules). Complementary: ast-grep for
+  shape, one-grep for intent.
+* **Hybrid codebase search**: `zg` (`zvec-grep`, Node/TypeScript cousin)
+  — same BM25+vector idea, ~250 ms
+  per query in our bench vs ~70–200 ms for one-grep hybrid. one-grep is
+  the faster native port with the in-tree MCP server.
+* **Jev ranking backend**: the default is the hosted
+  [TypeSafe Jev API](https://typesafe.ai/) (`TYPESAFE_API_KEY`). Local
+  options speak the same `POST /v1/systemone` wire protocol, selectable
+  via `TYPESAFE_BASE_URL`:
+  * [LocalJev](https://github.com/githubnext/localjev) — Bun +
+    DiffusionGemma through an OpenAI-compatible endpoint (oMLX).
+    Wire-compatible, but probabilities are prompted/self-reported rather
+    than logit-read, so check calibration on your workload before
+    trusting low-`exists` bands.
+  * [OpenJev](https://github.com/razorback16/openjev) — patched vLLM
+    backend with a structured logit read; needs NVIDIA hardware.
+* **Local rerank without Jev at all**: `query --rerank` / `--rank jina`
+  rescores with an on-device Jina cross-encoder — no key, no network,
+  ~1.1 s per query. In our bench it sweeps keywords (10/10) but adds
+  nothing on paraphrased concepts (0/4).
 
 ## Docs
 
