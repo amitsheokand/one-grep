@@ -7,6 +7,8 @@
 
 use std::sync::Mutex;
 
+use rmcp::schemars;
+
 use crate::Error;
 
 /// Maps texts to dense vectors. Implementations must be thread-safe.
@@ -306,6 +308,60 @@ fn global_cache_dir() -> std::path::PathBuf {
 mod tests {
     use super::*;
 
+    /// std-only fake llama-server: serves one canned `/v1/rerank`
+    /// response, then exits. Returns the base URL.
+    fn fake_rerank_server(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = vec![0u8; 65536];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn llama_reranker_orders_by_relevance_score() {
+        let url = fake_rerank_server(
+            r#"{"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.2}]}"#,
+        );
+        let r = LlamaReranker::from_url(&url).expect("client");
+        let order = r.rerank("q", &["alpha", "bravo"]).expect("rerank");
+        assert_eq!(order, vec![(1, 0.9), (0, 0.2)]);
+    }
+
+    #[test]
+    fn llama_reranker_accepts_plain_score_field() {
+        let url = fake_rerank_server(r#"{"results":[{"index":0,"score":0.5}]}"#);
+        let r = LlamaReranker::from_url(&url).expect("client");
+        let order = r.rerank("q", &["only"]).expect("rerank");
+        assert_eq!(order, vec![(0, 0.5)]);
+    }
+
+    #[test]
+    fn llama_reranker_empty_docs_short_circuits() {
+        // No server needed: empty input never touches the network.
+        let r = LlamaReranker::from_url("http://127.0.0.1:9").expect("client");
+        assert!(r.rerank("q", &[]).expect("rerank").is_empty());
+    }
+
+    #[test]
+    fn rank_kind_parses_lowercase_labels() {
+        let parse =
+            |s: &str| serde_json::from_value::<RankKind>(serde_json::Value::String(s.into()));
+        assert_eq!(parse("jev").expect("jev"), RankKind::Jev);
+        assert_eq!(parse("jina").expect("jina"), RankKind::Jina);
+        assert_eq!(parse("llama").expect("llama"), RankKind::Llama);
+        assert!(parse("bert").is_err());
+    }
+
     #[test]
     fn model_labels_roundtrip() {
         for (label, model) in [
@@ -327,6 +383,20 @@ pub trait Rerank: Send + Sync {
     ///
     /// Returns [`Error::Embed`] when the backend fails.
     fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<(usize, f32)>, Error>;
+}
+
+/// Ranking backend selector, shared by CLI (`--rank`) and MCP
+/// (`search_ranked rank`). `jev` is hosted, `jina` is in-process ONNX,
+/// `llama` is a llama.cpp server (`--rerank`/`--embedding --pooling rank`,
+/// e.g. `bge-reranker-v2-m3` on Vulkan) over HTTP.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum RankKind {
+    Jev,
+    Jina,
+    Llama,
 }
 
 /// In-process cross-encoder (`jina-reranker-v1-turbo-en`, ~38M params).
@@ -367,5 +437,110 @@ impl Rerank for JinaReranker {
             .into_iter()
             .map(|r| (r.index, r.score))
             .collect())
+    }
+}
+
+/// Env override for the reranker server URL.
+pub const ENV_RERANK_URL: &str = "ONE_GREP_RERANK_URL";
+/// llama-server default port.
+pub const DEFAULT_RERANK_URL: &str = "http://127.0.0.1:8080";
+/// HTTP budget per rerank call.
+const RERANK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Cross-encoder over HTTP: a llama.cpp server started with `--rerank`
+/// (e.g. `bge-reranker-v2-m3`, ideally Vulkan-offloaded). Speaks the
+/// documented `POST /v1/rerank {query, documents, top_n}` endpoint and
+/// returns best-first `(doc_index, score)` like every [`Rerank`] backend.
+pub struct LlamaReranker {
+    client: reqwest::blocking::Client,
+    base_url: String,
+}
+
+impl std::fmt::Debug for LlamaReranker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlamaReranker")
+            .field("base_url", &self.base_url)
+            .finish_non_exhaustive()
+    }
+}
+
+impl LlamaReranker {
+    /// Build for an explicit base URL (`http://127.0.0.1:8080` shape).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Embed`] when the HTTP client cannot be built.
+    pub fn from_url(base_url: &str) -> Result<Self, Error> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(RERANK_TIMEOUT)
+            .build()
+            .map_err(|e| Error::Embed(e.to_string()))?;
+        Ok(Self {
+            client,
+            base_url: base_url.trim_end_matches('/').to_owned(),
+        })
+    }
+
+    /// Build from `ONE_GREP_RERANK_URL`, defaulting to the llama-server
+    /// loopback default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Embed`] when the HTTP client cannot be built.
+    pub fn from_env() -> Result<Self, Error> {
+        let base_url =
+            std::env::var(ENV_RERANK_URL).unwrap_or_else(|_| DEFAULT_RERANK_URL.to_owned());
+        Self::from_url(&base_url)
+    }
+
+    fn post(&self, query: &str, docs: &[&str]) -> Result<serde_json::Value, Error> {
+        let url = format!("{}/v1/rerank", self.base_url);
+        let response = self
+            .client
+            .post(url)
+            .json(&serde_json::json!({
+                "query": query,
+                "documents": docs,
+                "top_n": docs.len(),
+            }))
+            .send()
+            .map_err(|e| Error::Embed(e.to_string()))?;
+        let status = response.status();
+        let text = response.text().map_err(|e| Error::Embed(e.to_string()))?;
+        if !status.is_success() {
+            let mut err = text.trim().to_owned();
+            if err.len() > 180 {
+                err.truncate(180);
+            }
+            return Err(Error::Embed(format!("rerank HTTP {status}: {err}")));
+        }
+        serde_json::from_str(&text).map_err(|e| Error::Embed(e.to_string()))
+    }
+}
+
+impl Rerank for LlamaReranker {
+    fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<(usize, f32)>, Error> {
+        if docs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let body = self.post(query, docs)?;
+        let mut scored: Vec<(usize, f32)> = Vec::new();
+        if let Some(results) = body.get("results").and_then(|r| r.as_array()) {
+            for item in results {
+                let (Some(index), Some(score)) = (
+                    item.get("index").and_then(serde_json::Value::as_u64),
+                    item.get("relevance_score")
+                        .or_else(|| item.get("score"))
+                        .and_then(serde_json::Value::as_f64),
+                ) else {
+                    continue;
+                };
+                if (index as usize) < docs.len() {
+                    scored.push((index as usize, score as f32));
+                }
+            }
+        }
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        Ok(scored)
     }
 }

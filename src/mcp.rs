@@ -153,6 +153,10 @@ struct SearchParams {
     fts: Option<Vec<String>>,
     /// Fuse vector similarity with BM25 (default true).
     fuse: Option<bool>,
+    /// Ranking backend for `search_ranked` (`jev` default with unranked
+    /// fallback, `jina` local ONNX, `llama` llama.cpp server). Ignored by
+    /// unranked `search`.
+    rank: Option<crate::embed::RankKind>,
     /// Restrict hits to languages (`rust`, `python`, `typescript`, `go`,
     /// `java`, `nix`, `markdown`).
     /// Applied to every path, including the exact-`rg` shortcut.
@@ -421,12 +425,15 @@ impl OneGrep {
         }
         let fuse = p.fuse.unwrap_or(true);
         let indexed = index::is_indexed(&root);
+        // Default preserves history: Jev with unranked fallback. Explicit
+        // backends run their own meter instead.
+        let rank = p.rank.unwrap_or(crate::embed::RankKind::Jev);
         let query_for_rank = query.clone();
         let root_for_rank = root.clone();
         // Identifier queries stay lexical (router); only the fused path
         // consumes vectors, so only it can report them stale.
         let want_vectors = indexed && fuse && !lexical_only;
-        let (status, hits) = tokio::task::spawn_blocking(move || {
+        let (note, hits): (String, Vec<fuse::FusedHit>) = tokio::task::spawn_blocking(move || {
             let mut hits = if !indexed || lexical_only {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
             } else if fuse {
@@ -444,16 +451,43 @@ impl OneGrep {
                 fuse::apply_ast(&mut hits, &refs);
                 hits.truncate(limit);
             }
-            // Filter before the meter: Jev scores winners only, and
+            // Filter before the meter: rankers score winners only, and
             // `limit` bounds what the caller ever sees.
             hits.retain(|h| filter.keep(&h.path));
             hits.truncate(limit);
-            Ok::<_, crate::Error>(crate::jev::rerank_hits(&query_for_rank, hits))
+            if rank == crate::embed::RankKind::Jev {
+                let (status, hits) = crate::jev::rerank_hits(&query_for_rank, hits);
+                return Ok::<_, crate::Error>((status.note, hits));
+            }
+            let label = match rank {
+                crate::embed::RankKind::Jina => "jina",
+                crate::embed::RankKind::Llama => "llama",
+                crate::embed::RankKind::Jev => unreachable!("jev handled above"),
+            };
+            let reranker: Box<dyn crate::embed::Rerank> = match rank {
+                crate::embed::RankKind::Jina => match crate::embed::JinaReranker::load() {
+                    Ok(r) => Box::new(r),
+                    Err(e) => {
+                        return Ok((format!("rank: fallback ({e})"), hits));
+                    }
+                },
+                crate::embed::RankKind::Llama => match crate::embed::LlamaReranker::from_env() {
+                    Ok(r) => Box::new(r),
+                    Err(e) => {
+                        return Ok((format!("rank: fallback ({e})"), hits));
+                    }
+                },
+                crate::embed::RankKind::Jev => unreachable!("jev handled above"),
+            };
+            match fuse::rescore(&query_for_rank, &mut hits, reranker.as_ref()) {
+                Ok(()) => Ok((format!("rank: {label}"), hits)),
+                Err(e) => Ok((format!("rank: fallback ({e})"), hits)),
+            }
         })
         .await
         .map_err(|e| internal(e.to_string()))?
         .map_err(internal)?;
-        let mut notes = vec![status.note.clone()];
+        let mut notes = vec![note];
         if indexed && index::is_stale(&root) {
             notes.push(index::stale_note(&root));
         }
@@ -763,6 +797,7 @@ mod tests {
                     query: query.into(),
                     fts: None,
                     fuse: Some(false),
+                    rank: None,
                     lang: None,
                     globs: None,
                     ast_pattern: None,
@@ -796,6 +831,7 @@ mod tests {
                     query: query.into(),
                     fts,
                     fuse: Some(false),
+                    rank: None,
                     lang: None,
                     globs: None,
                     ast_pattern: None,
@@ -821,6 +857,7 @@ mod tests {
                 query: "where is supersonic_ferret".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: None,
@@ -919,6 +956,7 @@ mod tests {
                     query: query.into(),
                     fts: None,
                     fuse: Some(false),
+                    rank: None,
                     lang: None,
                     globs: None,
                     ast_pattern: None,
@@ -1043,6 +1081,7 @@ mod tests {
                 query: "canary query terms here".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: None,
@@ -1095,6 +1134,7 @@ mod tests {
                 query: "needle_haystack_unique".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: Some(vec!["rust".into()]),
                 globs: None,
                 ast_pattern: None,
@@ -1114,6 +1154,7 @@ mod tests {
                 query: "needle_haystack_unique".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: Some(vec!["cobol".into()]),
                 globs: None,
                 ast_pattern: None,
@@ -1146,6 +1187,7 @@ mod tests {
                 query: "budgettoken filler prose documentation".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: None,
@@ -1227,6 +1269,72 @@ mod tests {
         assert!(body.contains("a.rs:1:fn apply()"), "{body}");
     }
 
+    /// `rank=llama` scores through a llama.cpp `--rerank` server and
+    /// reports its own header; a dead endpoint fails closed to retrieval
+    /// order instead of erroring the search.
+    #[tokio::test]
+    async fn search_ranked_llama_backend_round_trips() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.txt"), "llama probe alpha\n").expect("fixture");
+        std::fs::write(workspace.path().join("b.txt"), "llama probe bravo\n").expect("fixture");
+        crate::index::sync(workspace.path()).expect("sync");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let url = fake_llama_rerank(
+            r#"{"results":[{"index":1,"relevance_score":0.9},{"index":0,"relevance_score":0.1}]}"#,
+        );
+        let prev = std::env::var_os(crate::embed::ENV_RERANK_URL);
+        // SAFETY: distinct variable, restored below; other tests do not
+        // read it (Jev paths use TYPESAFE_*).
+        unsafe {
+            std::env::set_var(crate::embed::ENV_RERANK_URL, &url);
+        }
+        let server = OneGrep::new();
+        let ranked = |rank| {
+            server.search_ranked(Parameters(SearchParams {
+                root: root.clone(),
+                query: "llama probe documentation".into(),
+                fts: None,
+                fuse: Some(false),
+                rank,
+                lang: None,
+                globs: None,
+                ast_pattern: None,
+                ast_lang: None,
+                format: None,
+                limit: Some(5),
+            }))
+        };
+        let result = ranked(Some(crate::embed::RankKind::Llama))
+            .await
+            .expect("ranked");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("rank: llama"), "{body}");
+        // Mock scores index 1 at 0.9 and index 0 at 0.1: winners first
+        // regardless of which file the index returned first.
+        assert!(
+            body.find("(0.9000)").unwrap() < body.find("(0.1000)").unwrap(),
+            "{body}"
+        );
+        assert!(body.contains("a.txt") && body.contains("b.txt"), "{body}");
+        // Dead endpoint: fallback header, retrieval order, still success.
+        unsafe {
+            std::env::set_var(crate::embed::ENV_RERANK_URL, "http://127.0.0.1:9");
+        }
+        let result = ranked(Some(crate::embed::RankKind::Llama))
+            .await
+            .expect("ranked");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(crate::embed::ENV_RERANK_URL, v),
+                None => std::env::remove_var(crate::embed::ENV_RERANK_URL),
+            }
+        }
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("rank: fallback"), "{body}");
+    }
+
     #[tokio::test]
     async fn search_ast_pattern_fuses_third_list() {
         let _guard = crate::astg::tests::env_lock();
@@ -1252,6 +1360,7 @@ mod tests {
                 query: "structural needle prose documentation".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: Some("fn $F".into()),
@@ -1277,6 +1386,7 @@ mod tests {
                 query: "structural needle prose documentation".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: Some("fn $F".into()),
@@ -1288,6 +1398,26 @@ mod tests {
             .expect_err("absent ast-grep must fail");
         unpoint_ast_grep();
         assert!(err.message.contains("ast-grep"), "{err:?}");
+    }
+
+    /// std-only fake llama-server: one canned `/v1/rerank` response.
+    /// Returns the base URL. Distinct env var from the ast-grep fakes,
+    /// so no lock is shared with them.
+    fn fake_llama_rerank(body: &'static str) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = vec![0u8; 65536];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).expect("write");
+        });
+        format!("http://{addr}")
     }
 
     /// `format=json` returns a machine envelope on every tool; text stays
@@ -1305,6 +1435,7 @@ mod tests {
                 query: "jsonprobe_token".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: None,
@@ -1352,6 +1483,7 @@ mod tests {
                 query: "jsonprobe_token prose documentation".into(),
                 fts: None,
                 fuse: Some(false),
+                rank: None,
                 lang: None,
                 globs: None,
                 ast_pattern: None,

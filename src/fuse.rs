@@ -224,6 +224,17 @@ pub fn hybrid(
     Ok(fused)
 }
 
+/// Rescore a pre-filtered shortlist with a cross-encoder (top-20 heads,
+/// tail keeps fused order). Lets callers filter before the meter instead
+/// of going through [`hybrid`].
+///
+/// # Errors
+///
+/// Returns [`Error`] when the reranker fails.
+pub fn rescore(query: &str, fused: &mut Vec<FusedHit>, reranker: &dyn Rerank) -> Result<(), Error> {
+    rerank_top(query, fused, reranker)
+}
+
 /// Rescore the top candidates with a cross-encoder; unranked tails keep
 /// fused order behind rescored heads.
 fn rerank_top(query: &str, fused: &mut Vec<FusedHit>, reranker: &dyn Rerank) -> Result<(), Error> {

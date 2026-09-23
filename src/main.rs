@@ -12,17 +12,6 @@ struct Cli {
     command: Command,
 }
 
-/// Ranking backend for `query`. An enum (not a string) so illegal values
-/// are rejected by the parser: the type checker closes the port before any
-/// solver or meter runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-enum RankBackend {
-    /// TypeSafe Jev Nouls over the closed shortlist.
-    Jev,
-    /// Local Jina cross-encoder over fused top-20.
-    Jina,
-}
-
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Index a workspace for hybrid search.
@@ -46,9 +35,15 @@ enum Command {
         /// Conflicts with `--rank`; prefer `--rank jina`.
         #[arg(long, conflicts_with = "rank")]
         rerank: bool,
-        /// Rank the retrieval shortlist inside the tool.
+        /// Rank the retrieval shortlist inside the tool
+        /// (`jev`: hosted Nouls; `jina`: local ONNX cross-encoder;
+        /// `llama`: llama.cpp `--rerank` server, e.g. on Vulkan).
         #[arg(long, value_enum)]
-        rank: Option<RankBackend>,
+        rank: Option<one_grep::embed::RankKind>,
+        /// Base URL for `--rank llama` (default `ONE_GREP_RERANK_URL` or
+        /// the llama-server loopback default).
+        #[arg(long, value_name = "URL")]
+        rank_endpoint: Option<String>,
         /// Fuse ast-grep structural hits as a third RRF list (implies
         /// hybrid; needs `--ast-lang` and the `ast-grep` binary on PATH).
         #[arg(long, value_name = "PATTERN")]
@@ -182,21 +177,23 @@ async fn main() -> Result<()> {
             hybrid,
             rerank,
             rank,
+            rank_endpoint,
             ast,
             ast_lang,
             json,
         } => {
+            use one_grep::embed::RankKind;
             // `--rerank` and `--rank` conflict at parse time, so this match
             // is exhaustive: illegal combos are unwired, not runtime errors.
             let backend = match (rerank, rank) {
-                (true, None) => Some(RankBackend::Jina),
+                (true, None) => Some(RankKind::Jina),
                 (false, r) => r,
                 (true, Some(_)) => {
                     unreachable!("clap conflicts_with rejects --rerank with --rank")
                 }
             };
-            let rank_jev = backend == Some(RankBackend::Jev);
-            let rank_jina = backend == Some(RankBackend::Jina);
+            let rank_jev = backend == Some(RankKind::Jev);
+            let rank_local = matches!(backend, Some(RankKind::Jina | RankKind::Llama));
             // `--ast` implies hybrid retrieval: the structural hits fuse as
             // a third RRF list over the fused shortlist.
             if ast.is_some() && ast_lang.is_none() {
@@ -209,7 +206,7 @@ async fn main() -> Result<()> {
             let indexed = one_grep::index::is_indexed(&path);
             // Shared router: explicit flags force intent; otherwise exact
             // anchors go rg and single tokens go BM25, like MCP `search`.
-            if !hybrid && !rank_jev && !rank_jina {
+            if !hybrid && !rank_jev && !rank_local {
                 match one_grep::route::route(&query, &[]) {
                     one_grep::route::Route::Literal(pattern) => {
                         let options = one_grep::rg::Options {
@@ -372,22 +369,31 @@ async fn main() -> Result<()> {
                 }
                 return Ok(());
             }
-            if hybrid || rank_jina {
+            if hybrid || rank_local {
                 let provider = match one_grep::vectors::store_model(&path)? {
                     Some(name) => one_grep::embed::FastembedProvider::load_model(
                         one_grep::embed::OnnxModel::parse_stored(&name)?,
                     )?,
                     None => one_grep::embed::FastembedProvider::load()?,
                 };
-                let reranker = rank_jina
-                    .then(one_grep::embed::JinaReranker::load)
-                    .transpose()?;
+                let jina = backend == Some(RankKind::Jina);
+                let reranker: Option<Box<dyn one_grep::embed::Rerank>> = if jina {
+                    Some(Box::new(one_grep::embed::JinaReranker::load()?))
+                } else if backend == Some(RankKind::Llama) {
+                    let llama = match &rank_endpoint {
+                        Some(url) => one_grep::embed::LlamaReranker::from_url(url)?,
+                        None => one_grep::embed::LlamaReranker::from_env()?,
+                    };
+                    Some(Box::new(llama))
+                } else {
+                    None
+                };
                 let mut hits = one_grep::fuse::hybrid(
                     &path,
                     &query,
                     limit,
                     Some(&provider),
-                    reranker.as_ref().map(|r| r as &dyn one_grep::embed::Rerank),
+                    reranker.as_deref(),
                 )?;
                 fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
                 if json {
