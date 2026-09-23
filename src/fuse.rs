@@ -42,6 +42,18 @@ pub struct FusedHit {
     pub vector_rank: Option<usize>,
 }
 
+/// Retrieval source for output budgets: which list(s) produced the hit.
+/// Live-`rg` fallbacks carry neither rank.
+#[must_use]
+pub fn source(hit: &FusedHit) -> &'static str {
+    match (hit.lexical_rank, hit.vector_rank) {
+        (Some(_), Some(_)) => "bm25+vec",
+        (Some(_), None) => "bm25",
+        (None, Some(_)) => "vec",
+        (None, None) => "rg",
+    }
+}
+
 fn chunk_key(path: &Path, start: u64, end: u64, breadcrumb: &str) -> String {
     format!("{}:{start}-{end}:{breadcrumb}", path.display())
 }
@@ -299,15 +311,15 @@ pub fn collect(
 
 fn from_rg(hits: Vec<rg::Hit>) -> Vec<FusedHit> {
     hits.into_iter()
-        .enumerate()
-        .map(|(i, hit)| FusedHit {
+        .map(|hit| FusedHit {
             path: hit.path,
             start: hit.line,
             end: hit.line,
             breadcrumb: "rg-fallback".to_owned(),
             text: hit.text,
             score: 0.0,
-            lexical_rank: Some(i + 1),
+            // Unranked live hits: no list claims them, so `source` is "rg".
+            lexical_rank: None,
             vector_rank: None,
         })
         .collect()
@@ -341,8 +353,10 @@ mod tests {
             hybrid(dir.path(), "where is supersonic_ferret", 10, None, None).expect("hybrid");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].breadcrumb, "rg-fallback");
-        assert_eq!(hits[0].lexical_rank, Some(1));
+        // Unranked live hits claim no list; the budget tags them "rg".
+        assert_eq!(hits[0].lexical_rank, None);
         assert_eq!(hits[0].vector_rank, None);
+        assert_eq!(source(&hits[0]), "rg");
     }
 
     #[test]

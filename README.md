@@ -122,7 +122,7 @@ pool, `rg` for exact text/symbols/regex. Cite `path:line` evidence.
 
 | Tool | Params | Returns |
 | :--- | :--- | :--- |
-| `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score)` chunks; `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set; single tokens go BM25 |
+| `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score) source=bm25\|vec\|bm25+vec\|rg` chunks (text capped, 1-line crumb); `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set; single tokens go BM25 |
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
 | `rg` | `root*`, `pattern*`, `regex?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `limit?=100` (1–500) | `path:line:text` lines, gitignore-aware |

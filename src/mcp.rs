@@ -84,6 +84,7 @@ fn render(
     end: u64,
     breadcrumb: &str,
     score: &str,
+    source: &str,
     text: &str,
 ) -> String {
     let mut short = text;
@@ -94,8 +95,13 @@ fn render(
         }
         short = &short[..end];
     }
+    // One header line: newlines in crumbs would break the line budget.
+    let crumb: String = breadcrumb
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
     format!(
-        "{}:{start}-{end} [{breadcrumb}] ({score})\n{short}",
+        "{}:{start}-{end} [{crumb}] ({score}) source={source}\n{short}",
         hit_path.display()
     )
 }
@@ -501,6 +507,7 @@ fn render_ranked(h: &index::RankedHit) -> String {
         h.end,
         &h.breadcrumb,
         &format!("{:.2}", h.score),
+        "bm25",
         &h.text,
     )
 }
@@ -512,12 +519,21 @@ fn render_fused(h: &fuse::FusedHit) -> String {
         h.end,
         &h.breadcrumb,
         &format!("{:.4}", h.score),
+        fuse::source(h),
         &h.text,
     )
 }
 
 fn render_live(h: &rg::Hit) -> String {
-    render(&h.path, h.line, h.line, "rg-fallback", "live", &h.text)
+    render(
+        &h.path,
+        h.line,
+        h.line,
+        "rg-fallback",
+        "live",
+        "rg",
+        &h.text,
+    )
 }
 
 #[tool_handler]
@@ -951,5 +967,47 @@ mod tests {
             .await
             .expect_err("unknown lang must fail fast");
         assert!(err.message.contains("cobol"), "{err:?}");
+    }
+
+    /// Output budget (4.1): at most `limit` chunks, each text capped at
+    /// TEXT_CAP, every header one line carrying a source tag.
+    #[tokio::test]
+    async fn search_output_respects_chunk_budget() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+            let filler: String = "budgettoken filler prose ".repeat(200);
+            std::fs::write(
+                workspace.path().join(name),
+                format!("budgettoken\n{filler}\n"),
+            )
+            .expect("fixture");
+        }
+        crate::index::sync(workspace.path()).expect("sync");
+        let result = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                query: "budgettoken filler prose documentation".into(),
+                fts: None,
+                fuse: Some(false),
+                lang: None,
+                globs: None,
+                limit: Some(3),
+            }))
+            .await
+            .expect("search");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        let chunks: Vec<&str> = body.split("\n---\n").collect();
+        assert_eq!(chunks.len(), 3, "{body}");
+        for chunk in &chunks {
+            let (header, text) = chunk.split_once('\n').expect("header + text");
+            assert!(!header.contains("---"), "{header}");
+            let sources = ["source=bm25", "source=vec", "source=bm25+vec", "source=rg"];
+            assert!(
+                sources.iter().any(|s| header.contains(s)),
+                "no source tag: {header}"
+            );
+            assert!(text.chars().count() <= TEXT_CAP, "cap blown: {header}");
+        }
     }
 }
