@@ -748,4 +748,65 @@ mod tests {
             .expect_err("unknown lang must fail");
         assert!(err.message.contains("cobol"), "{err:?}");
     }
+
+    /// Offline default (1.4): with no key anywhere, `search_ranked` makes
+    /// no network attempt and preserves retrieval order. The sandbox
+    /// redirects HOME to an empty dir so key files cannot leak in.
+    #[tokio::test]
+    async fn search_ranked_offline_preserves_retrieval_order() {
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("HOME");
+        let prev_key = std::env::var_os(crate::jev::ENV_API_KEY);
+        // SAFETY: restored below; Jev callers fail closed to the same
+        // fallback order on error, so concurrent tests keep their verdicts.
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(crate::jev::ENV_API_KEY);
+        }
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("a.txt"),
+            "offline canary bravo\ncanary alpha\n",
+        )
+        .expect("fixture");
+        std::fs::write(workspace.path().join("b.txt"), "canary charlie\n").expect("fixture");
+        crate::index::sync(workspace.path()).expect("sync");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let expected: Vec<String> =
+            crate::fuse::collect(workspace.path(), "canary query terms here", 5, false, None)
+                .expect("collect")
+                .iter()
+                .map(|h| h.path.to_string_lossy().into_owned())
+                .collect();
+        let result = OneGrep::new()
+            .search_ranked(Parameters(SearchParams {
+                root,
+                query: "canary query terms here".into(),
+                fts: None,
+                fuse: Some(false),
+                limit: Some(5),
+            }))
+            .await
+            .expect("ranked");
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            if let Some(v) = prev_key {
+                std::env::set_var(crate::jev::ENV_API_KEY, v);
+            }
+        }
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("rank: fallback"), "{body}");
+        let mut cursor = 0;
+        for path in &expected {
+            let rel = cursor;
+            let found = body[rel..].find(path.as_str()).map(|i| rel + i);
+            let pos = found.unwrap_or_else(|| panic!("{path} missing in order: {body}"));
+            assert!(pos >= cursor, "{path} out of order: {body}");
+            cursor = pos + path.len();
+        }
+    }
 }
