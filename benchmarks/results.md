@@ -276,6 +276,39 @@ hybrid #6. Incremental embed for the 184 new chunks took seconds
 friends) — the corpus gap is closed; what remains is ranking, for the
 RRF-spread experiment next.
 
+## Run 12 find — duplicate chain chunks stacked RRF terms (2026-09-24)
+
+While testing RRF spread, one fused slot showed score 0.1464 for
+lex=20/vec=None — impossible under single-count RRF (2×rrf(20) = 0.05
+at k=20). The lexical list contained the same
+(path, span, breadcrumb) chunk 3×: `chains::extract_workspace` emits one
+chunk per call site, so 3 calls to `apply_lane_defaults` inside
+`apply_request` produced 3 byte-identical chain docs, and fusion added
+an RRF term per copy (triple lexical credit). Every prior number on a
+re-synced workspace carries this distortion. Fixed: dedupe identical
+chains at extraction (`repeated_call_sites_emit_one_chain`), extractor
+version 3. Lesson: Run 5's one-credit discipline applies to duplicate
+docs as well as overlapping windows.
+
+## Run 12 experiment — RRF k=60 vs k=20 on clean data (2026-09-24)
+
+Invalidated once (above), then re-run on a fresh workspace (217 files,
+header chunks + splits + dedupe in, full embed). Single-pass recall
+(deterministic, no sampling noise):
+
+| backend | k=60 keyword | k=60 concept | k=20 keyword | k=20 concept |
+|---|---|---|---|---|
+| lexical | 7/10 | 2/4 | 7/10 | 2/4 |
+| hybrid | 8/10 | 1/4 | **9/10** | 1/4 |
+
+k=20 flips `stop gemma` (mechanism checked: spread separates vec-4/6
+from vec-20+ instead of compressing them), regresses nothing, leaves
+lexical untouched by construction. Kept: short candidate lists
+(fetch ≤ 500, effective top-50) need less smoothing than TREC-scale
+full rankings, and the v2 gate still holds. The motivating
+pretty-prompt case did not move (vec-29 stays buried) — that one needs
+the semantic judge, not more spread.
+
 ## Run 12 fix verified — symbol size cap (2026-09-24)
 
 Implemented: `Symbol` chunks spanning >80 lines split into overlapping

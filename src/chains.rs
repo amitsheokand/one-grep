@@ -179,6 +179,11 @@ pub fn extract_workspace(workspace: &Path) -> Result<Vec<extract::Chunk>, Error>
     }
 
     let mut chains = Vec::new();
+    // Repeated call sites (same caller span + callee) produce byte-identical
+    // chunks. Each duplicate would steal a pool slot and stack another RRF
+    // term onto the same fused slot (Run 12: triple lexical credit for one
+    // logical chunk). Keep the first, drop the rest.
+    let mut seen = std::collections::HashSet::new();
     'outer: for (fi, p) in parsed.iter().enumerate() {
         for call in &p.calls {
             if chains.len() >= MAX_CHAINS {
@@ -204,6 +209,15 @@ pub fn extract_workspace(workspace: &Path) -> Result<Vec<extract::Chunk>, Error>
                 }
             }
             let callee = &parsed[tfi].chunks[tci];
+            let key = (
+                p.rel.clone(),
+                caller.start,
+                caller.end,
+                simple_name(&callee.breadcrumb).to_owned(),
+            );
+            if !seen.insert(key) {
+                continue;
+            }
             chains.push(extract::Chunk {
                 path: PathBuf::from(&p.rel),
                 start: caller.start,
@@ -270,6 +284,20 @@ mod tests {
         ]);
         let chains = extract_workspace(dir.path()).expect("chains");
         assert!(chains.is_empty());
+    }
+
+    #[test]
+    fn repeated_call_sites_emit_one_chain() {
+        let dir = workspace_with(&[(
+            "a.py",
+            "def caller():\n    callee()\n    callee()\n    callee()\n\ndef callee():\n    pass\n",
+        )]);
+        let chains = extract_workspace(dir.path()).expect("chains");
+        let matching: Vec<_> = chains
+            .iter()
+            .filter(|c| c.breadcrumb == "caller > calls > callee")
+            .collect();
+        assert_eq!(matching.len(), 1, "{chains:?}");
     }
 
     #[test]

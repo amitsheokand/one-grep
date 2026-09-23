@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// RRF smoothing constant.
-const RRF_K: f64 = 60.0;
+const RRF_K: f64 = 20.0;
 /// Lexical terms weigh double: exact matches outrank fuzzy ones, while
 /// vector-only discovery still surfaces when lexical misses entirely.
 const LEXICAL_WEIGHT: f64 = 2.0;
@@ -439,8 +439,9 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].lexical_rank, Some(1));
         assert_eq!(hits[0].vector_rank, Some(1));
-        // Present in both lists: weighted sum of both RRF terms.
-        let expected = 2.0 / 61.0 + 1.0 / 61.0;
+        // Present in both lists: weighted sum of both RRF terms,
+        // computed from the constant so the test tracks retunes.
+        let expected = 2.0 / (RRF_K + 1.0) + 1.0 / (RRF_K + 1.0);
         assert!((hits[0].score - expected).abs() < 1e-9);
     }
 

@@ -11,7 +11,7 @@ use crate::Error;
 /// Extractor version. Bump when chunking rules change; the index sync
 /// treats a mismatch as a full reindex (chunk IDs of unchanged content
 /// stay stable, so vectors re-embed incrementally).
-pub const EXTRACT_VERSION: &str = "2";
+pub const EXTRACT_VERSION: &str = "3";
 
 /// How a chunk was derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
