@@ -16,6 +16,7 @@ pub mod jev;
 pub mod lsp;
 pub mod mcp;
 pub mod rg;
+pub mod route;
 pub mod vectors;
 pub mod watch;
 

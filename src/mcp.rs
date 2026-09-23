@@ -18,7 +18,7 @@ use rmcp::{
     },
 };
 
-use crate::{embed::FastembedProvider, fuse, index, lsp, rg};
+use crate::{embed::FastembedProvider, fuse, index, lsp, rg, route};
 use serde::Deserialize;
 
 /// Max chars of chunk text per tool hit.
@@ -39,26 +39,6 @@ fn check_root(root: &str) -> Result<PathBuf, McpError> {
         ));
     }
     Ok(path)
-}
-
-fn exact_pattern(query: &str) -> Option<&str> {
-    let query = query.trim();
-    for quote in ['"', '\''] {
-        if let Some(literal) = query
-            .strip_prefix(quote)
-            .and_then(|s| s.strip_suffix(quote))
-        {
-            return (!literal.trim().is_empty() && !literal.contains(quote)).then_some(literal);
-        }
-    }
-    let identifier = |part: &str| {
-        let mut chars = part.chars();
-        chars
-            .next()
-            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-    };
-    (query.contains("::") && query.split("::").all(identifier)).then_some(query)
 }
 
 fn internal(e: impl std::fmt::Display) -> McpError {
@@ -202,12 +182,13 @@ impl OneGrep {
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
-        if p.fts.as_ref().is_none_or(|anchors| anchors.is_empty()) {
-            if let Some(pattern) = exact_pattern(&p.query) {
+        let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
+        match route::route(&p.query, fts) {
+            route::Route::Literal(pattern) => {
                 return self
                     .rg(Parameters(RgParams {
                         root: p.root.clone(),
-                        pattern: pattern.to_owned(),
+                        pattern,
                         regex: Some(false),
                         case_insensitive: Some(false),
                         lang: None,
@@ -216,6 +197,22 @@ impl OneGrep {
                     }))
                     .await;
             }
+            route::Route::Identifier(term) => {
+                // Exact beats fuzzy: single tokens go BM25, never hybrid.
+                let lines: Vec<String> = if index::is_indexed(&root) {
+                    lexical(&root, &term, limit)?
+                } else {
+                    rg_fallback_lines(&root, &term, limit)?
+                };
+                let body = lines.join("\n---\n");
+                let text = if index::is_indexed(&root) {
+                    body
+                } else {
+                    format!("{}\n\n{body}", rg::unindexed_note(&root))
+                };
+                return Ok(CallToolResult::success(vec![ContentBlock::text(text)]));
+            }
+            route::Route::Intent(_) => {}
         }
         let mut query = p.query.clone();
         if let Some(fts) = &p.fts {
@@ -265,21 +262,24 @@ impl OneGrep {
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
-        if p.fts.as_ref().is_none_or(|anchors| anchors.is_empty()) {
-            if let Some(pattern) = exact_pattern(&p.query) {
-                return self
-                    .rg(Parameters(RgParams {
-                        root: p.root.clone(),
-                        pattern: pattern.to_owned(),
-                        regex: Some(false),
-                        case_insensitive: Some(false),
-                        lang: None,
-                        globs: None,
-                        limit: Some(limit),
-                    }))
-                    .await;
-            }
+        let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
+        let cls = route::route(&p.query, fts);
+        if let route::Route::Literal(pattern) = &cls {
+            return self
+                .rg(Parameters(RgParams {
+                    root: p.root.clone(),
+                    pattern: pattern.clone(),
+                    regex: Some(false),
+                    case_insensitive: Some(false),
+                    lang: None,
+                    globs: None,
+                    limit: Some(limit),
+                }))
+                .await;
         }
+        // Single identifiers go lexical even when ranked: the meter rescores
+        // a BM25 shortlist instead of paying for vectors.
+        let lexical_only = matches!(cls, route::Route::Identifier(_));
         let mut query = p.query.clone();
         if let Some(fts) = &p.fts {
             query.push(' ');
@@ -290,7 +290,7 @@ impl OneGrep {
         let query_for_rank = query.clone();
         let root_for_rank = root.clone();
         let (status, hits) = tokio::task::spawn_blocking(move || {
-            let hits = if !indexed {
+            let hits = if !indexed || lexical_only {
                 fuse::collect(&root_for_rank, &query_for_rank, limit, false, None)
             } else if fuse {
                 match provider() {
@@ -513,34 +513,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn exact_routing_requires_an_unambiguous_anchor() {
-        for query in [
-            "foo::Bar",
-            " foo::Bar ",
-            "\"x:Name\"",
-            "\"{Binding User.Name}\"",
-            "'x:Name'",
-            "'comment lies'",
-        ] {
-            assert!(exact_pattern(query).is_some(), "{query}");
-        }
-        for query in [
-            "where is authentication handled",
-            "find definition of foo::Bar",
-            "foo::Bar example",
-            "foo::",
-            "::Bar",
-            "foo:::Bar",
-            "https://example.com",
-            "\"\"",
-            "\"   \"",
-            "''",
-            "\"foo\" OR \"bar\"",
-            "'foo' OR 'bar'",
-            "Bar",
-        ] {
-            assert_eq!(exact_pattern(query), None, "{query}");
-        }
+    fn literal_and_identifier_take_different_paths_unindexed() {
+        // Branch-observable routing contract (no index, so no model load):
+        // literals return bare rg hits; identifiers return rg-fallback
+        // lines with the indexing note.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("rt");
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.txt"), "supersonic_ferret\n").expect("write");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let body = |query: &str| {
+            let result = rt
+                .block_on(OneGrep::new().search(Parameters(SearchParams {
+                    root: root.clone(),
+                    query: query.into(),
+                    fts: None,
+                    fuse: Some(false),
+                    limit: None,
+                })))
+                .expect("search");
+            let text = serde_json::to_value(result).expect("response");
+            text["content"][0]["text"].as_str().unwrap().to_owned()
+        };
+        let literal = body("\"supersonic_ferret\"");
+        assert!(literal.contains("a.txt:1:supersonic_ferret"), "{literal}");
+        assert!(!literal.contains("Indexing is available"), "{literal}");
+        let identifier = body("supersonic_ferret");
+        assert!(identifier.contains("supersonic_ferret"), "{identifier}");
+        assert!(identifier.contains("Indexing is available"), "{identifier}");
     }
 
     #[tokio::test]

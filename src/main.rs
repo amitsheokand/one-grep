@@ -160,6 +160,53 @@ async fn main() -> Result<()> {
             let rank_jev = backend == Some(RankBackend::Jev);
             let rank_jina = backend == Some(RankBackend::Jina);
             let indexed = one_grep::index::is_indexed(&path);
+            // Shared router: explicit flags force intent; otherwise exact
+            // anchors go rg and single tokens go BM25, like MCP `search`.
+            if !hybrid && !rank_jev && !rank_jina {
+                match one_grep::route::route(&query, &[]) {
+                    one_grep::route::Route::Literal(pattern) => {
+                        let options = one_grep::rg::Options {
+                            regex: false,
+                            case_insensitive: false,
+                            globs: Vec::new(),
+                            langs: Vec::new(),
+                            limit,
+                        };
+                        let hits = one_grep::rg::search(&path, &pattern, &options)?;
+                        if json {
+                            print_json(&hits)?;
+                            return Ok(());
+                        }
+                        for hit in hits {
+                            println!("{}:{}:{}", hit.path.display(), hit.line, hit.text);
+                        }
+                        return Ok(());
+                    }
+                    one_grep::route::Route::Identifier(term) => {
+                        if indexed {
+                            let hits = one_grep::index::search(&path, &term, limit)?;
+                            if json {
+                                print_json(&hits)?;
+                                return Ok(());
+                            }
+                            for hit in hits {
+                                println!(
+                                    "{}:{}-{} [{}] ({:.2})\n{}",
+                                    hit.path.display(),
+                                    hit.start,
+                                    hit.end,
+                                    hit.breadcrumb,
+                                    hit.score,
+                                    hit.text
+                                );
+                            }
+                            return Ok(());
+                        }
+                        // Unindexed identifiers fall through to live rg below.
+                    }
+                    one_grep::route::Route::Intent(_) => {}
+                }
+            }
             if rank_jev {
                 let hits = if indexed && (hybrid || rank_jev) {
                     let provider = match one_grep::vectors::store_model(&path)? {
