@@ -188,11 +188,11 @@ struct BlockStyle {
 fn read_skill_md_capped(path: &Path) -> Result<String, String> {
     use std::io::Read;
     let mut file = std::fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
-    let mut buf = vec![0u8; SKILL_MD_READ_CAP];
-    let n = file
-        .read(&mut buf)
+    let mut buf = Vec::new();
+    file.take(SKILL_MD_READ_CAP as u64)
+        .read_to_end(&mut buf)
         .map_err(|e| format!("could not read: {e}"))?;
-    Ok(String::from_utf8_lossy(&buf[..n]).into_owned())
+    Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn strip_bom(text: &str) -> &str {
@@ -329,11 +329,32 @@ fn parse_block(indicator: &str, lines: &[&str], i: &mut usize) -> Result<String,
     }
 }
 
+fn ascii_space_indent(line: &str) -> usize {
+    line.chars().take_while(|c| *c == ' ').count()
+}
+
+fn strip_ascii_spaces(line: &str, count: usize) -> String {
+    let mut spaces = 0;
+    let mut byte_end = 0;
+    for c in line.chars() {
+        if spaces >= count {
+            break;
+        }
+        if c == ' ' {
+            spaces += 1;
+            byte_end += c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    line[byte_end..].to_owned()
+}
+
 fn dedent_block_lines(raw: &[String]) -> Vec<String> {
     let min_indent = raw
         .iter()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| l.len() - l.trim_start().len())
+        .map(|l| ascii_space_indent(l))
         .min()
         .unwrap_or(0);
     raw.iter()
@@ -341,8 +362,7 @@ fn dedent_block_lines(raw: &[String]) -> Vec<String> {
             if l.trim().is_empty() {
                 String::new()
             } else {
-                let strip = min_indent.min(l.len());
-                l[strip..].to_owned()
+                strip_ascii_spaces(l, min_indent)
             }
         })
         .collect()
@@ -910,6 +930,16 @@ mod tests {
     }
 
     #[test]
+    fn block_scalar_with_ideographic_space_does_not_panic() {
+        let md = format!(
+            "---\nname: ws\ndescription: |\n  ascii line\n  \u{3000}fullwidth lead\n---\nbody\n"
+        );
+        let parsed = parse_skill_md(&md, "f").expect("parse").expect("some");
+        assert!(parsed.description.contains("ascii line"));
+        assert!(parsed.description.contains("fullwidth lead"));
+    }
+
+    #[test]
     fn dash_line_inside_block_does_not_close_front_matter() {
         let md = "---\nname: inner\ndescription: |\n  ---\n  not a fence\n---\nbody\n";
         let parsed = parse_skill_md(md, "f").expect("parse").expect("some");
@@ -1029,15 +1059,20 @@ mod tests {
             .collect();
         let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
         let mut captured = None;
-        rerank_nouls("WinRT API", &refs, NoulWording::SKILL, |state, _questions| {
-            captured = Some(state.clone());
-            Ok(serde_json::json!({
-                "exists": {"noul": 0.9},
-                "c0": {"noul": 0.9},
-                "c1": {"noul": 0.9},
-                "c2": {"noul": 0.9},
-            }))
-        })
+        rerank_nouls(
+            "WinRT API",
+            &refs,
+            NoulWording::SKILL,
+            |state, _questions| {
+                captured = Some(state.clone());
+                Ok(serde_json::json!({
+                    "exists": {"noul": 0.9},
+                    "c0": {"noul": 0.9},
+                    "c1": {"noul": 0.9},
+                    "c2": {"noul": 0.9},
+                }))
+            },
+        )
         .expect("rank");
         let state = captured.expect("state");
         assert!(state.get("task").is_some());
