@@ -74,6 +74,56 @@ fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
+/// Env override for the serving-log path (tests point it at a tmp file).
+pub const ENV_SERVING_LOG: &str = "ONE_GREP_SERVING_LOG";
+
+/// Best-effort per-call serving log (`~/.one-grep/serving.log`, JSONL).
+/// One row per MCP call: tool, root, query, hits returned, response
+/// chars, notes, latency. Never fails the call — errors are swallowed.
+/// A pi-side correlator joins these rows with subsequent `read` calls to
+/// answer "hits → did they still read the file?".
+fn log_call(
+    tool: &str,
+    root: &str,
+    query: &str,
+    hits: usize,
+    chars: usize,
+    notes: &[String],
+    latency_ms: f64,
+) {
+    let path = std::env::var_os(ENV_SERVING_LOG)
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|h| h.join(".one-grep").join("serving.log"))
+        });
+    let Some(path) = path else { return };
+    let query: String = query.chars().take(500).collect();
+    let row = serde_json::json!({
+        "ts": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        "tool": tool,
+        "root": root,
+        "query": query,
+        "hits": hits,
+        "chars": chars,
+        "notes": notes,
+        "latency_ms": (latency_ms * 10.0).round() / 10.0,
+    });
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    use std::io::Write as _;
+    let _ = writeln!(file, "{row}");
+}
+
 /// Caller errors (unknown `--lang`, bad glob) are `invalid_params`; engine
 /// failures stay `internal_error`. Fails closed either way.
 fn rg_error(e: crate::Error) -> McpError {
@@ -245,6 +295,7 @@ impl OneGrep {
         let format = Format::opt(p.format);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
         let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
+        let started = std::time::Instant::now();
         match route::route(&p.query, fts) {
             route::Route::Literal(pattern) => {
                 return self
@@ -275,6 +326,15 @@ impl OneGrep {
                     let mut hits = index::search(&root, &term, limit).map_err(internal)?;
                     hits.retain(|h| filter.keep(&h.path));
                     if let Some(envelope) = format.envelope(&notes, &hits) {
+                        log_call(
+                            "search",
+                            &p.root,
+                            &term,
+                            hits.len(),
+                            envelope.len(),
+                            &notes,
+                            started.elapsed().as_secs_f64(),
+                        );
                         return Ok(text_block(envelope));
                     }
                     let lines: Vec<String> = hits.iter().map(render_ranked).collect();
@@ -284,16 +344,44 @@ impl OneGrep {
                     } else {
                         format!("{}\n\n{body}", notes.join("\n"))
                     };
+                    log_call(
+                        "search",
+                        &p.root,
+                        &term,
+                        lines.len(),
+                        text.len(),
+                        &notes,
+                        started.elapsed().as_secs_f64(),
+                    );
                     return Ok(text_block(text));
                 }
                 let mut hits = rg::fallback_search(&root, &term, limit).map_err(internal)?;
                 hits.retain(|h| filter.keep(&h.path));
                 if let Some(envelope) = format.envelope(&notes, &hits) {
+                    log_call(
+                        "search",
+                        &p.root,
+                        &term,
+                        hits.len(),
+                        envelope.len(),
+                        &notes,
+                        started.elapsed().as_secs_f64(),
+                    );
                     return Ok(text_block(envelope));
                 }
                 let lines: Vec<String> = hits.iter().map(render_live).collect();
                 let body = lines.join("\n---\n");
-                return Ok(text_block(format!("{}\n\n{body}", notes.join("\n"))));
+                let text = format!("{}\n\n{body}", notes.join("\n"));
+                log_call(
+                    "search",
+                    &p.root,
+                    &term,
+                    lines.len(),
+                    text.len(),
+                    &notes,
+                    started.elapsed().as_secs_f64(),
+                );
+                return Ok(text_block(text));
             }
             route::Route::Intent(_) => {}
         }
@@ -357,6 +445,15 @@ impl OneGrep {
             notes.push(rg::unindexed_note(&root));
         }
         if let Some(envelope) = format.envelope(&notes, &fused) {
+            log_call(
+                "search",
+                &p.root,
+                &query,
+                fused.len(),
+                envelope.len(),
+                &notes,
+                started.elapsed().as_secs_f64(),
+            );
             return Ok(text_block(envelope));
         }
         let lines: Vec<String> = fused.iter().map(render_fused).collect();
@@ -366,6 +463,15 @@ impl OneGrep {
         } else {
             format!("{}\n\n{body}", notes.join("\n"))
         };
+        log_call(
+            "search",
+            &p.root,
+            &query,
+            lines.len(),
+            text.len(),
+            &notes,
+            started.elapsed().as_secs_f64(),
+        );
         Ok(text_block(text))
     }
 
@@ -381,6 +487,7 @@ impl OneGrep {
         let format = Format::opt(p.format);
         let fts: &[String] = p.fts.as_deref().unwrap_or(&[]);
         let filter = HitFilter::build(&root, p.lang.clone(), p.globs.clone())?;
+        let started = std::time::Instant::now();
         let cls = route::route(&p.query, fts);
         if let route::Route::Literal(pattern) = &cls {
             return self
@@ -498,6 +605,15 @@ impl OneGrep {
             notes.push(rg::unindexed_note(&root));
         }
         if let Some(envelope) = format.envelope(&notes, &hits) {
+            log_call(
+                "search_ranked",
+                &p.root,
+                &p.query,
+                hits.len(),
+                envelope.len(),
+                &notes,
+                started.elapsed().as_secs_f64(),
+            );
             return Ok(text_block(envelope));
         }
         let body = hits
@@ -506,7 +622,16 @@ impl OneGrep {
             .collect::<Vec<_>>()
             .join("\n---\n");
         let text = format!("{}\n\n{body}", notes.join("\n"));
-        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+        log_call(
+            "search_ranked",
+            &p.root,
+            &p.query,
+            hits.len(),
+            text.len(),
+            &notes,
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(text_block(text))
     }
 
     #[tool(
@@ -517,6 +642,7 @@ impl OneGrep {
         Parameters(p): Parameters<DefinitionParams>,
     ) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
+        let started = std::time::Instant::now();
         let file = resolve_in_root(&root, &p.path).ok_or_else(|| {
             McpError::invalid_params(format!("path escapes workspace root: {}", p.path), None)
         })?;
@@ -542,11 +668,38 @@ impl OneGrep {
                 p.character
             );
             if let Some(envelope) = format.envelope(&[note.clone()], &Vec::<lsp::Target>::new()) {
+                log_call(
+                    "definition",
+                    &p.root,
+                    &p.path,
+                    0,
+                    envelope.len(),
+                    &[],
+                    started.elapsed().as_secs_f64(),
+                );
                 return Ok(text_block(envelope));
             }
+            log_call(
+                "definition",
+                &p.root,
+                &p.path,
+                0,
+                note.len(),
+                &[],
+                started.elapsed().as_secs_f64(),
+            );
             return Ok(text_block(note));
         }
         if let Some(envelope) = format.envelope(&[], &targets) {
+            log_call(
+                "definition",
+                &p.root,
+                &p.path,
+                targets.len(),
+                envelope.len(),
+                &[],
+                started.elapsed().as_secs_f64(),
+            );
             return Ok(text_block(envelope));
         }
         let lines: Vec<String> = targets
@@ -565,7 +718,17 @@ impl OneGrep {
                 )
             })
             .collect();
-        Ok(text_block(lines.join("\n")))
+        let text = lines.join("\n");
+        log_call(
+            "definition",
+            &p.root,
+            &p.path,
+            targets.len(),
+            text.len(),
+            &[],
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(text_block(text))
     }
 
     #[tool(
@@ -573,6 +736,7 @@ impl OneGrep {
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
+        let started = std::time::Instant::now();
         let format = Format::opt(p.format);
         if p.structural.unwrap_or(false) {
             if p.regex.unwrap_or(false) {
@@ -597,6 +761,15 @@ impl OneGrep {
             let limit = p.limit.unwrap_or(100).clamp(1, 500);
             let hits = crate::astg::search(&root, &p.pattern, lang, limit).map_err(rg_error)?;
             if let Some(envelope) = format.envelope(&[], &hits) {
+                log_call(
+                    "rg",
+                    &p.root,
+                    &p.pattern,
+                    hits.len(),
+                    envelope.len(),
+                    &[],
+                    started.elapsed().as_secs_f64(),
+                );
                 return Ok(text_block(envelope));
             }
             let lines: Vec<String> = hits
@@ -610,7 +783,17 @@ impl OneGrep {
                     )
                 })
                 .collect();
-            return Ok(text_block(lines.join("\n")));
+            let text = lines.join("\n");
+            log_call(
+                "rg",
+                &p.root,
+                &p.pattern,
+                hits.len(),
+                text.len(),
+                &[],
+                started.elapsed().as_secs_f64(),
+            );
+            return Ok(text_block(text));
         }
         let options = rg::Options {
             regex: p.regex.unwrap_or(false),
@@ -627,7 +810,17 @@ impl OneGrep {
             .iter()
             .map(|h| format!("{}:{}:{}", h.path.display(), h.line, h.text))
             .collect();
-        Ok(text_block(lines.join("\n")))
+        let text = lines.join("\n");
+        log_call(
+            "rg",
+            &p.root,
+            &p.pattern,
+            hits.len(),
+            text.len(),
+            &[],
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(text_block(text))
     }
 }
 
@@ -1419,6 +1612,44 @@ mod tests {
             stream.write_all(response.as_bytes()).expect("write");
         });
         format!("http://{addr}")
+    }
+
+    /// Serving log: one JSONL row per call, opt-out path via env.
+    /// Proves the serving side of "hits → did they still read?".
+    #[tokio::test]
+    async fn serving_log_appends_json_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("serving.log");
+        // SAFETY: unique path in this var; no other test reads it.
+        unsafe {
+            std::env::set_var(ENV_SERVING_LOG, log.to_string_lossy().into_owned());
+        }
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.txt"), "logged_token here\n").expect("fixture");
+        OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                pattern: "logged_token".into(),
+                regex: None,
+                structural: None,
+                case_insensitive: None,
+                lang: None,
+                globs: None,
+                format: None,
+                limit: None,
+            }))
+            .await
+            .expect("rg");
+        unsafe {
+            std::env::remove_var(ENV_SERVING_LOG);
+        }
+        let content = std::fs::read_to_string(&log).expect("log written");
+        let row: serde_json::Value = serde_json::from_str(content.trim()).expect("json row");
+        assert_eq!(row["tool"], "rg");
+        assert_eq!(row["query"], "logged_token");
+        assert_eq!(row["hits"], 1);
+        assert!(row["chars"].as_u64().unwrap() > 0);
+        assert!(row["latency_ms"].as_f64().unwrap() >= 0.0);
     }
 
     /// `format=json` returns a machine envelope on every tool; text stays
