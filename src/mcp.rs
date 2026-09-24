@@ -241,9 +241,7 @@ fn log_call(
         "notes": notes,
         "latency_ms": (latency_ms * 10.0).round() / 10.0,
     });
-    let _guard = LOG_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock();
+    let _guard = LOG_LOCK.get_or_init(|| std::sync::Mutex::new(())).lock();
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -2015,7 +2013,15 @@ mod tests {
             .map(|t| {
                 std::thread::spawn(move || {
                     for i in 0..25 {
-                        log_call("rg", "/ws", &format!("query {t}-{i} padded padding"), 1, 10, &[], 0.5);
+                        log_call(
+                            "rg",
+                            "/ws",
+                            &format!("query {t}-{i} padded padding"),
+                            1,
+                            10,
+                            &[],
+                            0.5,
+                        );
                     }
                 })
             })
