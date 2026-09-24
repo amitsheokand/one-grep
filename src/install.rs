@@ -261,9 +261,8 @@ fn install_command_code() -> Result<PathBuf, Error> {
 /// Upsert `one-grep` under `mcp_servers` without round-tripping the whole YAML
 /// document (preserves anchors/comments elsewhere).
 fn upsert_hermes_one_grep(content: &str, exe: &str) -> String {
-    let block = format!(
-        "  one-grep:\n    command: {exe}\n    args:\n      - serve\n      - --stdio\n"
-    );
+    let block =
+        format!("  one-grep:\n    command: {exe}\n    args:\n      - serve\n      - --stdio\n");
     let lines: Vec<&str> = content.lines().collect();
     let Some(mcp_idx) = lines.iter().position(|l| l.trim_end() == "mcp_servers:") else {
         let mut out = content.trim_end().to_owned();
@@ -289,12 +288,7 @@ fn upsert_hermes_one_grep(content: &str, exe: &str) -> String {
 
     let mut one_start = None;
     let mut one_end = None;
-    for (i, line) in lines
-        .iter()
-        .enumerate()
-        .take(end_section)
-        .skip(mcp_idx + 1)
-    {
+    for (i, line) in lines.iter().enumerate().take(end_section).skip(mcp_idx + 1) {
         if *line == "  one-grep:" || line.starts_with("  one-grep:") {
             one_start = Some(i);
             let mut j = i + 1;
