@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
             if hybrid || rank_local {
                 let jina = backend == Some(RankKind::Jina);
                 let use_llama = backend == Some(RankKind::Llama);
-                let mut hits = if use_llama {
+                let hits = if use_llama {
                     let path = path.clone();
                     let query = query.clone();
                     let rank_endpoint = rank_endpoint.clone();
