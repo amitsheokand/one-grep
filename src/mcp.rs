@@ -189,11 +189,24 @@ fn assignment_at(chars: &[char], i: usize) -> Option<(usize, usize)> {
     }
 }
 
+/// Serializes concurrent appends within this process. (Across processes,
+/// atomicity comes from writing each row with a single syscall; see below.)
+static LOG_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
 /// Best-effort per-call serving log (`~/.one-grep/serving.log`, JSONL).
 /// One row per MCP call: tool, root, query, hits returned, response
 /// chars, notes, latency. Never fails the call — errors are swallowed.
 /// A pi-side correlator joins these rows with subsequent `read` calls to
 /// answer "hits → did they still read the file?".
+///
+/// Two integrity rules, both learned the hard way (interleaved mush found
+/// in the wild):
+/// - each row goes out in a **single** `write_all` syscall (O_APPEND
+///   position update is atomic; `writeln!` formats in pieces and splits
+///   under concurrency);
+/// - test builds stay out of the production log unless
+///   `ONE_GREP_SERVING_LOG` is set explicitly (handler unit tests
+///   otherwise pollute it with /tmp roots).
 fn log_call(
     tool: &str,
     root: &str,
@@ -203,13 +216,15 @@ fn log_call(
     notes: &[String],
     latency_ms: f64,
 ) {
-    let path = std::env::var_os(ENV_SERVING_LOG)
-        .map(PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .map(|h| h.join(".one-grep").join("serving.log"))
-        });
+    let explicit = std::env::var_os(ENV_SERVING_LOG).map(PathBuf::from);
+    if cfg!(test) && explicit.is_none() {
+        return;
+    }
+    let path = explicit.or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .map(|h| h.join(".one-grep").join("serving.log"))
+    });
     let Some(path) = path else { return };
     let query: String = redact(&query.chars().take(500).collect::<String>());
     let notes: Vec<String> = notes.iter().map(|n| redact(n)).collect();
@@ -226,15 +241,19 @@ fn log_call(
         "notes": notes,
         "latency_ms": (latency_ms * 10.0).round() / 10.0,
     });
-    let Ok(mut file) = std::fs::OpenOptions::new()
+    let _guard = LOG_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock();
+    if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(&path)
-    else {
-        return;
-    };
-    use std::io::Write as _;
-    let _ = writeln!(file, "{row}");
+    {
+        use std::io::Write as _;
+        let mut buf = row.to_string();
+        buf.push('\n');
+        let _ = file.write_all(buf.as_bytes());
+    }
 }
 
 /// Caller errors (unknown `--lang`, bad glob) are `invalid_params`; engine
@@ -1982,6 +2001,38 @@ mod tests {
             .await
             .expect_err("escape must fail");
         assert!(err.message.contains("escapes"), "{err:?}");
+    }
+
+    #[test]
+    fn serving_log_concurrent_appends_stay_whole() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("serving.log");
+        // SAFETY:unique path in this var; serializes with the lock below.
+        unsafe {
+            std::env::set_var(ENV_SERVING_LOG, log.to_string_lossy().into_owned());
+        }
+        let handles: Vec<_> = (0..8)
+            .map(|t| {
+                std::thread::spawn(move || {
+                    for i in 0..25 {
+                        log_call("rg", "/ws", &format!("query {t}-{i} padded padding"), 1, 10, &[], 0.5);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("thread");
+        }
+        unsafe {
+            std::env::remove_var(ENV_SERVING_LOG);
+        }
+        let content = std::fs::read_to_string(&log).expect("log written");
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 200);
+        for line in lines {
+            let row: serde_json::Value = serde_json::from_str(line).expect("whole row");
+            assert_eq!(row["tool"], "rg");
+        }
     }
 
     #[test]
