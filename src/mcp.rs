@@ -77,6 +77,118 @@ fn internal(e: impl std::fmt::Display) -> McpError {
 /// Env override for the serving-log path (tests point it at a tmp file).
 pub const ENV_SERVING_LOG: &str = "ONE_GREP_SERVING_LOG";
 
+/// Redact emails and key-like secrets from text bound for the serving log.
+/// The log must stay joinable, so paths are left alone — only free text
+/// (queries, error notes) passes through here.
+fn redact(text: &str) -> String {
+    redact_assignments(&redact_emails(text))
+}
+
+fn is_email_token(token: &str) -> bool {
+    let mut parts = token.split('@');
+    let (Some(local), Some(domain), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    !local.is_empty()
+        && domain.contains('.')
+        && local
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '%' | '+' | '-'))
+        && domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+}
+
+fn redact_emails(text: &str) -> String {
+    text.split_inclusive(|c: char| c.is_whitespace())
+        .map(|piece| {
+            let trimmed = piece.trim_end();
+            let trailing: String = piece[trimmed.len()..].to_owned();
+            if is_email_token(trimmed) {
+                format!("<redacted-email>{trailing}")
+            } else {
+                piece.to_owned()
+            }
+        })
+        .collect()
+}
+
+/// Key names whose values never belong in a log.
+const SECRET_KEYS: &[&str] = &[
+    "api_key",
+    "apikey",
+    "auth",
+    "authorization",
+    "bearer",
+    "key",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+];
+
+fn redact_assignments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let chars: Vec<char> = text.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if let Some((key_end, value_start)) = assignment_at(&chars, i) {
+            let key: String = chars[i..key_end].iter().collect();
+            if SECRET_KEYS.iter().any(|k| key.eq_ignore_ascii_case(k)) {
+                let mut value_end = value_start;
+                let quoted = chars
+                    .get(value_start)
+                    .is_some_and(|c| *c == '"' || *c == '\'');
+                if quoted {
+                    let quote = chars[value_start];
+                    value_end += 1;
+                    while value_end < chars.len() && chars[value_end] != quote {
+                        value_end += 1;
+                    }
+                    value_end = (value_end + 1).min(chars.len());
+                } else {
+                    while value_end < chars.len() && !chars[value_end].is_whitespace() {
+                        value_end += 1;
+                    }
+                }
+                out.push_str(&key);
+                out.push_str(&chars[key_end..value_start].iter().collect::<String>());
+                out.push_str("<redacted>");
+                i = value_end;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// At `i`: `key` + optional spaces + `=`/`:` + optional spaces, with `key`
+/// a bare word. Returns (key end, value start) byte-of-char indices.
+fn assignment_at(chars: &[char], i: usize) -> Option<(usize, usize)> {
+    let mut j = i;
+    while j < chars.len() && (chars[j].is_ascii_alphanumeric() || matches!(chars[j], '_' | '-')) {
+        j += 1;
+    }
+    if j == i {
+        return None;
+    }
+    let key_end = j;
+    while j < chars.len() && chars[j].is_whitespace() && chars[j] != '\n' {
+        j += 1;
+    }
+    if j < chars.len() && (chars[j] == '=' || chars[j] == ':') {
+        j += 1;
+        while j < chars.len() && chars[j].is_whitespace() && chars[j] != '\n' {
+            j += 1;
+        }
+        Some((key_end, j))
+    } else {
+        None
+    }
+}
+
 /// Best-effort per-call serving log (`~/.one-grep/serving.log`, JSONL).
 /// One row per MCP call: tool, root, query, hits returned, response
 /// chars, notes, latency. Never fails the call — errors are swallowed.
@@ -99,7 +211,8 @@ fn log_call(
                 .map(|h| h.join(".one-grep").join("serving.log"))
         });
     let Some(path) = path else { return };
-    let query: String = query.chars().take(500).collect();
+    let query: String = redact(&query.chars().take(500).collect::<String>());
+    let notes: Vec<String> = notes.iter().map(|n| redact(n)).collect();
     let row = serde_json::json!({
         "ts": std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1869,6 +1982,24 @@ mod tests {
             .await
             .expect_err("escape must fail");
         assert!(err.message.contains("escapes"), "{err:?}");
+    }
+
+    #[test]
+    fn serving_log_redacts_emails_and_keys() {
+        assert_eq!(
+            redact("mail alice@example.com about token=abc123 here"),
+            "mail <redacted-email> about token=<redacted> here"
+        );
+        assert_eq!(
+            redact(r#"key: "hunter2", normal words"#),
+            r#"key: <redacted>, normal words"#
+        );
+        // Non-secrets pass through untouched (paths stay joinable).
+        assert_eq!(
+            redact("/home/alice/ws passwordless login"),
+            "/home/alice/ws passwordless login"
+        );
+        assert_eq!(redact("plain query text"), "plain query text");
     }
 
     /// Serving log: one JSONL row per call, opt-out path via env.
