@@ -58,8 +58,21 @@ actually care about.
 | 4.1 | `og-budget` — MCP returns max N chunks, each truncated, with score, `source=rg\|bm25\|vec`, one-line breadcrumb (JSON without a cap moves the dump, it does not save tokens) | **Done** — every chunk line carries `source=` (`bm25`/`vec`/`bm25+vec` from ranks, `rg` for live hits), crumbs flattened to one line, text capped at 1200 chars; `search_output_respects_chunk_budget` pins count+cap+tags | token-count test on a fixed fixture: capped < uncapped, winners retained |
 | 4.2 | `og-astg-fuse` — do **not** reimplement rewrite rules: shell out to `ast-grep` when present and fuse its hits as a third RRF list. `--lang` stays the only overlap | **Done** — `src/astg.rs` bridge (verified live against ast-grep 0.45.1 JSON schema + lang coverage incl. nix/markdown), `fuse::apply_ast` third RRF list with `ast_rank` tiebreak, opt-in via `rg --structural` / `query --ast` / MCP `rg.structural` + `search ast_pattern/ast_lang`; absent binary fails closed, empty list is a no-op | `ast-grep` absent → identical results; present → third list fused, never merged as rewrite |
 
+## Token-efficiency mapping (Cursor post, 2026-09)
+
+Targeted: (1) toolgate `read` numbers every 10th line + first line of the
+window (their measured no-quality-drop scheme); (2) output determinism
+audit — fixed `vectors::load_items` HashMap order leaking into `topk`
+ties and `vector_rank` across processes (sorted store order + total
+comparator); cleared rmcp `list_all` (sorts by name), rg fallback
+(sorted + tested), chains maps (lookup-only), serial walks. Not targeted:
+system-prompt trimming, cache breakpoints, subagents (not our surfaces),
+dynamic tool loading (harness-side), per-10th numbering inside one-grep
+search snippets (already exact start-end).
+
 ## Must not
 
+- Remove MCP tools to save static context: Cursor kept `ask_question` visible because models hallucinate calls for tools they need but cannot see. Same law here — keep all six tools, keep each schema slim.
 - Add CLI/MCP surface before Phase 1 gates pass.
 - Default any ranker that loses to lexical on the frozen concept set.
 - Reimplement ast-grep rules/rewrite inside one-grep.
@@ -73,3 +86,4 @@ actually care about.
 - https://github.com/razorback16/openjev (logit-read backend, NVIDIA)
 - https://ast-grep.github.io/ (structure boundary: `--lang` overlap only)
 - `docs/dev/TASKLIST-fused-rank.md` (retrieves-vs-judges split; still in force)
+- https://cursor.com/blog/improved-token-efficiency (token-efficiency mapping: target landmark numbering + output determinism; keep all tools per the `ask_question` finding)

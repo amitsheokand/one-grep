@@ -292,9 +292,21 @@ pub fn topk(store_items: &[&VectorItem], query: &[f32], k: usize) -> Vec<(usize,
     scored
 }
 
-/// Load items for querying.
+/// Load items for querying, sorted by `(rel, start, end, breadcrumb)` so the
+/// order is identical in every process (the store is a `HashMap`, whose
+/// iteration order varies per process and would otherwise leak into rank ties).
 pub fn load_items(workspace: &Path) -> Result<Vec<VectorItem>, Error> {
-    Ok(load(workspace)?.items.into_values().collect())
+    let mut items: Vec<VectorItem> = load(workspace)?.items.into_values().collect();
+    // Full key order (store ids are rel/start/end/breadcrumb): ties are
+    // impossible, so this order is a pure function of store content.
+    items.sort_by(|a, b| {
+        a.rel
+            .cmp(&b.rel)
+            .then_with(|| a.start.cmp(&b.start))
+            .then_with(|| a.end.cmp(&b.end))
+            .then_with(|| a.breadcrumb.cmp(&b.breadcrumb))
+    });
+    Ok(items)
 }
 
 /// Model label the store was built with, if any.
@@ -425,5 +437,40 @@ pub mod tests {
         let ranked = topk(&refs, &[1.0, 0.0], 2);
         assert_eq!(ranked[0].0, 0);
         assert_eq!(ranked[1].0, 1);
+    }
+
+    #[test]
+    fn topk_ties_break_by_input_order() {
+        let mk = |rel: &str| VectorItem {
+            rel: rel.to_owned(),
+            start: 1,
+            end: 1,
+            kind: "window".to_owned(),
+            breadcrumb: String::new(),
+            text: String::new(),
+            embedding: vec![1.0, 0.0],
+        };
+        // Identical scores: `b` first in input stays first in output,
+        // so rank ties can never depend on HashMap iteration order.
+        let items = [mk("b"), mk("a")];
+        let refs: Vec<&VectorItem> = items.iter().collect();
+        let ranked = topk(&refs, &[1.0, 0.0], 2);
+        assert_eq!((ranked[0].0, ranked[1].0), (0, 1));
+    }
+
+    #[test]
+    fn load_items_returns_sorted_spans() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("b.txt"), "one\ntwo\nthree\n").expect("write");
+        std::fs::write(dir.path().join("a.txt"), "uno\ndos\n").expect("write");
+        sync(dir.path(), &TestProvider).expect("sync");
+        let items = load_items(dir.path()).expect("load");
+        let keys: Vec<(&str, u64, u64)> = items
+            .iter()
+            .map(|i| (i.rel.as_str(), i.start, i.end))
+            .collect();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        assert_eq!(keys, sorted);
     }
 }
