@@ -23,6 +23,8 @@ actually care about.
 | 1.3 | `og-intent-ranker` — ranker trained or prompted on intent, not keyword overlap; candidates: LocalJev via `TYPESAFE_BASE_URL`, fine-tuned MiniLM (`ft2`), fusion-constant retune. Jina stays available, never default | **Done (first cut)** — hybrid MiniLM measured on the frozen set (Run 11): paraphrase 2/3 → 3/3, no regressions; LocalJev wire path proven by mock round-trip test; real-corpus concepts still open (Run 9: 1/4) | concept R@3 beats lexical on the frozen set; keyword R@3 does not regress |
 | 1.7 | `og-rrf-spread` + `og-chain-dedupe` (Run 12) — duplicate chain chunks stacked RRF terms (found via impossible score); dedupe at extraction, extractor v3; RRF k 60→20 after clean A/B (keyword 8/10→9/10, no regress) | **Done** — 114 green incl. `repeated_call_sites_emit_one_chain`; score test now computed from the constant | RRF table above; v2 floors hold |
 
+| 1.10 | `og-context` (reads track) — expand any citation to its enclosing symbol via tree-sitter; MCP `context` + CLI; `definition` already returned full spans | **Done** — 143 green, CLI+JSON verified live | enclosing unit + MCP hit/miss/escape tests |
+
 | 1.9 | `og-laya-judge` — Laya 0.3.11 served locally, one-grep unmodified via `TYPESAFE_BASE_URL`; 4-concept + 10-keyword bake-off | **Done (negative)** — 8/10 + 1/4, identical to hybrid; Nouls score false friends ~0.55 (criteria too blunt), exists=0.68 overconfident; CPU 5–17 s/q | Run 14 table above |
 
 | 1.8 | `og-hits-read` — serving log (`ONE_GREP_SERVING_LOG`) + pi `tool_call` correlator extension (`one-grep-hits.ts`, syntax + handler smoke-tested) | **Done** — serving side committed; pi side experimental, join is offline by timestamp+path | serving_log test + extension smoke |
