@@ -959,6 +959,10 @@ fn render_live(h: &rg::Hit) -> String {
 impl rmcp::ServerHandler for OneGrep {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::new(ServerCapabilities::builder().enable_tools().build());
+        // Stamp the package version so harness MCP panels show whether the
+        // running server matches the installed binary (rebuilds need a
+        // consumer restart; the version makes staleness visible).
+        info.server_info.version = env!("CARGO_PKG_VERSION").to_owned();
         info.instructions = Some(
             "Local-first hybrid workspace search. Prefer `search_ranked` for intent \
              (retrieve + Jev inside the tool; only top-k winners enter context). \
@@ -1035,6 +1039,14 @@ pub async fn serve_http(port: u16, token: &str) -> Result<(), crate::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn server_info_carries_package_version() {
+        use rmcp::ServerHandler as _;
+        let info = OneGrep::new().get_info();
+        assert_eq!(info.server_info.version, env!("CARGO_PKG_VERSION"));
+        assert!(!info.server_info.version.is_empty());
+    }
 
     #[test]
     fn tool_router_lists_skill() {
