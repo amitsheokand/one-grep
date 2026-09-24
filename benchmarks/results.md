@@ -276,6 +276,25 @@ hybrid #6. Incremental embed for the 184 new chunks took seconds
 friends) — the corpus gap is closed; what remains is ranking, for the
 RRF-spread experiment next.
 
+## P8 — serving-side numbers, first cut (2026-09-24)
+
+`~/.one-grep/serving.log`, 1232 rows: 6 corrupt (0.5%, concurrent-append
+interleave — fixed: single-syscall appends + mutex, proven by
+`serving_log_concurrent_appends_stay_whole`), 350 test-pollution rows
+(/tmp roots — fixed: test builds stay out unless the env var is set),
+874 real rows. Real mix: **rg 863 (98.7%), search_ranked 9, skill 2,
+search 0, context 0**. Output p50 155 chars, p95 4650; latency sub-ms
+across the board. Reads side: pi correlator log absent — no pi sessions
+have run with the extension yet (pi needs a restart to load new
+extensions), so "did they still read" stays open; the DDE 43-vs-14
+stands as the only reads datum.
+
+Two readings: (1) agents reach for `rg`, not `search_ranked` — the
+"make ranked the default" advice has an adoption problem confirmed by
+data, not just taste; (2) output sizes are small (p95 4.6 KB), so the
+read problem really is *count × re-reads across turns*, not single
+dumps — consistent with the turns×context cost model.
+
 ## Run 13 note — hits→read instrumentation (2026-09-24)
 
 Serving side: every MCP call appends `{ts, tool, root, query, hits,
