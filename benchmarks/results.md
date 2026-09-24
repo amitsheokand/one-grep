@@ -276,6 +276,16 @@ hybrid #6. Incremental embed for the 184 new chunks took seconds
 friends) — the corpus gap is closed; what remains is ranking, for the
 RRF-spread experiment next.
 
+## Run 13 note — hits→read instrumentation (2026-09-24)
+
+Serving side: every MCP call appends `{ts, tool, root, query, hits,
+chars, notes, latency_ms}` to `~/.one-grep/serving.log`. Harness side:
+`~/.pi/agent/extensions/one-grep-hits.ts` logs one-grep search calls and
+`read` calls (pre-call hooks only — no result hook assumed) to
+`~/.pi/agent/obs/one-grep-hits.log`; cited paths come from the serving
+log, joined offline. First metric to watch: searches after which no
+full-file read follows.
+
 ## Run 13 — bge-reranker-v2-m3 on R9700 Vulkan as `--rank llama` (2026-09-24)
 
 llama-server built from source with `-DGGML_VULKAN=ON` (nix shell:

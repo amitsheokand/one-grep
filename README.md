@@ -166,6 +166,11 @@ How it is wired on a Pi / Home Manager laptop:
   `Authorization: Bearer <token>`.
 * Only `search_ranked` / `query --rank jev` makes a network call, to the
   configured Jev model; the key is never logged.
+* Every MCP call appends a JSONL row to `~/.one-grep/serving.log`
+  (`ONE_GREP_SERVING_LOG` overrides): tool, query, hits, chars, notes,
+  latency. A pi extension (`~/.pi/agent/extensions/one-grep-hits.ts`,
+  experimental) logs search/read calls beside it so an offline join
+  answers "hits → did they still read the file?".
 
 ## Alternatives
 
