@@ -266,6 +266,18 @@ struct RgParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SkillParams {
+    /// Task description; Jev ranks the skill library when a key is set.
+    task: String,
+    /// Max skills to return (default 2, max 5).
+    limit: Option<usize>,
+    /// Skill library root (default `ONE_GREP_SKILLS_DIR` or `~/.local/share/agent-skills`).
+    dir: Option<String>,
+    /// Output format: `text` (default) or `json` (`{"notes","hits"}`).
+    format: Option<Format>,
+}
+
 #[derive(Clone)]
 pub struct OneGrep {
     // Read by `#[tool_handler]` expansion; lint cannot see through the macro.
@@ -822,6 +834,57 @@ impl OneGrep {
         );
         Ok(text_block(text))
     }
+
+    #[tool(
+        description = "Route a task to the best matching agent skill from the on-disk skill library. Jev ranks inside the tool when a TypeSafe key is configured; otherwise lexical fallback. Returns skill name, path to SKILL.md, score, and a one-line description — never the skill body."
+    )]
+    async fn skill(
+        &self,
+        Parameters(p): Parameters<SkillParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let limit = p.limit.unwrap_or(2).clamp(1, 5);
+        let dir_for_log = p.dir.clone().unwrap_or_default();
+        let dir_path = p.dir.as_deref().map(PathBuf::from);
+        let format = Format::opt(p.format);
+        let task = p.task.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::skill::run(&task, dir_path.as_deref(), limit)
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))?;
+        let mut notes = result.notes.clone();
+        notes.insert(0, result.rank_note.clone());
+        if let Some(envelope) = format.envelope(
+            &notes,
+            &serde_json::json!({
+                "no_match": result.no_match,
+                "hits": result.hits,
+            }),
+        ) {
+            log_call(
+                "skill",
+                &dir_for_log,
+                &p.task,
+                result.hits.len(),
+                envelope.len(),
+                &notes,
+                started.elapsed().as_secs_f64(),
+            );
+            return Ok(text_block(envelope));
+        }
+        let text = result.format_text();
+        log_call(
+            "skill",
+            &dir_for_log,
+            &p.task,
+            result.hits.len(),
+            text.len(),
+            &notes,
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(text_block(text))
+    }
 }
 
 impl Default for OneGrep {
@@ -901,8 +964,9 @@ impl rmcp::ServerHandler for OneGrep {
              (retrieve + Jev inside the tool; only top-k winners enter context). \
              Use `search` for the raw fused pool. Use `rg` for exact text, symbols, \
              or regex. Use `definition` to jump from a Rust reference to its \
-             definition. Cite path:start-end evidence; to read more, read only \
-             the cited line range, never the whole file."
+             definition. Need a specialized skill (API docs, domain workflow)? Call \
+             `skill` with the task first. Cite path:start-end evidence; to read more, \
+             read only the cited line range, never the whole file."
                 .into(),
         );
         info
@@ -971,6 +1035,47 @@ pub async fn serve_http(port: u16, token: &str) -> Result<(), crate::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_router_lists_skill() {
+        assert!(OneGrep::new().tool_router.map.contains_key("skill"));
+    }
+
+    #[tokio::test]
+    async fn skill_tool_output_excludes_skill_body() {
+        let library = tempfile::tempdir().expect("library");
+        crate::skill::write_fixture(library.path()).expect("fixture");
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("HOME");
+        let prev_key = std::env::var(crate::jev::ENV_API_KEY).ok();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(crate::jev::ENV_API_KEY);
+        }
+        let result = OneGrep::new()
+            .skill(Parameters(SkillParams {
+                task: "WinRT API reference".into(),
+                limit: Some(3),
+                dir: Some(library.path().to_string_lossy().into_owned()),
+                format: None,
+            }))
+            .await
+            .expect("skill");
+        unsafe {
+            match prev_key {
+                Some(v) => std::env::set_var(crate::jev::ENV_API_KEY, v),
+                None => std::env::remove_var(crate::jev::ENV_API_KEY),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("winrt-lookup"), "{body}");
+        assert!(!body.contains("SECRET_BODY_MARKER"), "{body}");
+    }
 
     #[test]
     fn literal_and_identifier_take_different_paths_unindexed() {

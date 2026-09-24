@@ -108,6 +108,20 @@ enum Command {
         #[arg(long, default_value_t = one_grep::install::DEFAULT_PORT)]
         port: u16,
     },
+    /// Route a task to the best matching agent skill in the skill library.
+    Skill {
+        /// Task description.
+        task: String,
+        /// Skill library root (default `ONE_GREP_SKILLS_DIR` or `~/.local/share/agent-skills`).
+        #[arg(long)]
+        dir: Option<std::path::PathBuf>,
+        /// Max skills to return (1–5, default 2).
+        #[arg(long, default_value_t = 2)]
+        limit: usize,
+        /// Emit JSON (`notes`, `hits`) instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Register one-grep with an agent harness.
     Install {
         /// Agent target: opencode, cursor, pi, muse, hermes, command-code.
@@ -288,10 +302,9 @@ async fn main() -> Result<()> {
                 };
                 fuse_ast(&path, &mut hits, limit, &ast, &ast_lang)?;
                 let q = query.clone();
-                let (status, hits) = tokio::task::spawn_blocking(move || {
-                    one_grep::jev::rerank_hits(&q, hits)
-                })
-                .await?;
+                let (status, hits) =
+                    tokio::task::spawn_blocking(move || one_grep::jev::rerank_hits(&q, hits))
+                        .await?;
                 if json {
                     eprintln!("{}", status.note);
                     if !indexed {
@@ -588,6 +601,19 @@ async fn main() -> Result<()> {
             for hit in hits {
                 println!("{}:{}:{}", hit.path.display(), hit.line, hit.text);
             }
+        }
+        Command::Skill {
+            task,
+            dir,
+            limit,
+            json,
+        } => {
+            let result = one_grep::skill::run(&task, dir.as_deref(), limit);
+            if json {
+                print_json(&result)?;
+                return Ok(());
+            }
+            println!("{}", result.format_text());
         }
         Command::Serve { stdio, port } => {
             if stdio {
