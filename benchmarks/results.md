@@ -318,6 +318,33 @@ stronger ranker — Laya comparison stays open. R9700 Vulkan serving is
 proven for this path; CPU needs ~10 tok/s (≈8 min per 20-doc call),
 hence the 90 s client budget is Vulkan-first.
 
+## Run 14 — Laya as the Noul judge via the SystemOne seam (2026-09-24)
+
+Laya 0.3.11 (`pip install "laya[serve]"`, torch CPU — needed
+`LD_LIBRARY_PATH` to a nix gcc lib for `libstdc++.so.6`), served with
+`LAYA_PORT=8001 LAYA_DEVICE=cpu LAYA_MODELS=english LAYA_PRELOAD=1`.
+one-grep pointed unmodified at it: `TYPESAFE_BASE_URL`,
+`TYPESAFE_API_KEY=local`, `JEV_MCP_MODEL=english`. Same 10+4, `query
+--rank jev`:
+
+| set | lex | hyb | llama (Run 13) | **laya (CPU)** |
+|---|---|---|---|---|
+| keyword (10) | 7/10 | 8/10 | 9/10 | **8/10** |
+| concept (4) | 2/4 | 1/4 | 2/4 | **1/4** |
+
+Laya rerank is byte-identical in outcome to hybrid on all 14: the
+server runs (5–17 s/query on CPU — long chunk states in one forward
+pass) and scores honestly (`rank: jev exists=0.68` on no-secrets), but
+the false friends score ~0.55–0.58 instead of ~0.1, so order never
+changes. Two readings, both useful: (1) our Noul question template
+("states or implements what the query asks for") is too blunt to force
+sense disambiguation — the judge is only as sharp as its criteria;
+(2) `exists=0.68` with no true answer in the pool is overconfident,
+matching the calibration caution in Laya's own docs. Next levers in
+order: sharper per-query criteria, then a bigger shortlist (limit 8–10
+gives the judge more to choose from), then ROCm torch (no override
+hacks needed on this GPU per operator note — untried).
+
 ## Run 12 find — duplicate chain chunks stacked RRF terms (2026-09-24)
 
 While testing RRF spread, one fused slot showed score 0.1464 for
