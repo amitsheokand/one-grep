@@ -12,7 +12,7 @@ use serde_json::Value;
 
 use crate::{
     Error,
-    jev::{JevReranker, RankStatus, rerank_nouls},
+    jev::{JevReranker, NoulWording, RankStatus, rerank_nouls},
 };
 
 pub const ENV_SKILLS_DIR: &str = "ONE_GREP_SKILLS_DIR";
@@ -327,7 +327,7 @@ fn rank_entries(task: &str, entries: &[SkillEntry], limit: usize) -> (RankStatus
         .collect();
     let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
     let mut exists = None;
-    let order = match rerank_nouls(task, &refs, |state, questions| {
+    let order = match rerank_nouls(task, &refs, NoulWording::SKILL, |state, questions| {
         let body = reranker.evaluate(state, questions)?;
         let answers = body.get("answers").cloned().unwrap_or(Value::Null);
         exists = answers
@@ -578,7 +578,7 @@ mod tests {
             .map(|e| format!("{} {}", e.name, e.description))
             .collect();
         let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
-        let order = rerank_nouls("WinRT", &refs, |_state, _q| {
+        let order = rerank_nouls("WinRT", &refs, NoulWording::SEARCH, |_state, _q| {
             Ok(serde_json::json!({
                 "exists": {"type": "noul", "noul": 0.9},
                 "c0": {"type": "noul", "noul": 0.4},
@@ -588,7 +588,7 @@ mod tests {
         })
         .expect("rank");
         assert_eq!(order[0].0, 2);
-        let low_exists = rerank_nouls("q", &refs, |_state, _q| {
+        let low_exists = rerank_nouls("q", &refs, NoulWording::SEARCH, |_state, _q| {
             Ok(serde_json::json!({
                 "exists": {"type": "noul", "noul": 0.2},
                 "c0": {"type": "noul", "noul": 0.9},
