@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeReadFile": [
+      {
+        "command": "./.cursor/hooks/deny-full-read.py",
+        "matcher": "Read"
+      }
+    ]
+  }
+}
