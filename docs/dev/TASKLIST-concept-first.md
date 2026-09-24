@@ -63,7 +63,7 @@ actually care about.
 - Add CLI/MCP surface before Phase 1 gates pass.
 - Default any ranker that loses to lexical on the frozen concept set.
 - Reimplement ast-grep rules/rewrite inside one-grep.
-- Auto-index as a side effect of search (TASKLIST-fused-rank law stands).
+- Auto-index as a side effect of search (docs/dev/TASKLIST-fused-rank law stands).
 - Ship a network-dependent default path.
 
 ## Sources (public)
@@ -72,4 +72,4 @@ actually care about.
 - https://github.com/githubnext/localjev (local Jev wire-compatible backend)
 - https://github.com/razorback16/openjev (logit-read backend, NVIDIA)
 - https://ast-grep.github.io/ (structure boundary: `--lang` overlap only)
-- `TASKLIST-fused-rank.md` (retrieves-vs-judges split; still in force)
+- `docs/dev/TASKLIST-fused-rank.md` (retrieves-vs-judges split; still in force)

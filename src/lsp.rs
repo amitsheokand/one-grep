@@ -1,4 +1,4 @@
-//! Rust definition navigation over LSP stdio (`PACKET-ideasearch.md`).
+//! Rust definition navigation over LSP stdio (`docs/dev/PACKET-ideasearch.md`).
 //!
 //! Increment 1 covers `textDocument/definition` against `rust-analyzer`
 //! only. One server is reused per workspace + command; requests carry

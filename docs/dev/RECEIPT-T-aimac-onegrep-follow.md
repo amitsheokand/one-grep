@@ -6,7 +6,7 @@
 **Repos**: `~/dev/one-grep` + `~/dev/nixos-config`
 **No push. Local commits only.** (nixos-config `origin` = GitHub; coordinator fetches.)
 
-Follow-ups from `RECEIPT-onegrep.md` §4: (1) expand `one-grep install --target`,
+Follow-ups from `docs/dev/RECEIPT-onegrep.md` §4: (1) expand `one-grep install --target`,
 (2) shared Home Manager module for NixOS + vaayu.
 
 ---
@@ -113,7 +113,7 @@ generated activation.
 - `src/install.rs` — multi-target install (committed earlier as `e692f7e`)
 - `nix/home-manager/one-grep.nix` — `checkCommand` guard option
 - `nix/README.md` — `checkCommand` documented
-- `RECEIPT-T-aimac-onegrep-follow.md` — this receipt
+- `docs/dev/RECEIPT-T-aimac-onegrep-follow.md` — this receipt
 
 **nixos-config**
 - `modules/shared/one-grep.nix` — enabled wrapper (command route + guard)

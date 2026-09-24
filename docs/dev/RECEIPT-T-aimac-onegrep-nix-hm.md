@@ -55,7 +55,7 @@ optional MCP registration (cursor / opencode / pi / muse / hermes / command-code
 - `nix/home-manager/one-grep.nix`
 - `nix/README.md`
 - `INTEGRATION.md` (new §5 Nix / Home Manager)
-- `RECEIPT-T-aimac-onegrep-nix-hm.md` (this receipt)
+- `docs/dev/RECEIPT-T-aimac-onegrep-nix-hm.md` (this receipt)
 
 ---
 

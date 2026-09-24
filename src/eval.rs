@@ -1,4 +1,4 @@
-//! Phase-1 labeled retrieval evaluation (`PACKET-ideasearch.md`).
+//! Phase-1 labeled retrieval evaluation (`docs/dev/PACKET-ideasearch.md`).
 //!
 //! Versioned, self-contained query set over a synthetic fixture workspace.
 //! Measures first-stage lexical recall@k, MRR, top-1 accuracy, and

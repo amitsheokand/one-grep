@@ -1,46 +1,52 @@
 # one-grep
 
-Local-first hybrid workspace search in Rust: exact `rg` + BM25 lexical index
-(tantivy) + ONNX vector similarity with RRF fusion, exposed as a CLI and as an
-in-tree MCP server.
+Local-first hybrid workspace search in Rust. It combines exact `rg`,
+a BM25 lexical index (tantivy), and ONNX vector similarity with RRF
+fusion. It ships as a CLI and an in-tree MCP server.
 
 Public repo: [github.com/amitsheokand/one-grep](https://github.com/amitsheokand/one-grep).
 Crate/binary name: **`one-grep`**. License: Apache-2.0. MSRV: Rust 1.85.
 
 ## What it does
 
-* **No-index exact search** (`rg`): gitignore-aware literal-or-regex search
-  over files, walked on all cores with deterministic `(path, line)` order.
-  Literal by default; one outer `"..."` / `'...'` pair is stripped so
-  shell and MCP callers agree. `--lang` restricts to
+* **No-index exact search** (`rg`): searches files with literal-or-regex
+  text matching. It respects `.gitignore`. It walks all cores and returns
+  hits in deterministic `(path, line)` order. Literal matching is the
+  default. The search strips one outer `"..."` / `'...'` pair, so shell
+  and MCP callers agree. `--lang` restricts matches to
   `rust`/`python`/`typescript`/`go`/`java`/`nix`/`markdown`
-  (ast-grep-style); `--glob` adds
+  (ast-grep-style). `--glob` adds
   include globs (`!` negates). `--json` emits a `[{path,line,text}]`
-  array. Limit 1–500, default 100.
-* **Indexed lexical search** (`index` + `query`): tree-sitter chunking
-  (Rust/Python/TypeScript/Go/Java/Nix symbols, file-header comment blocks,
-  Markdown sections, sliding windows, 2-hop call-chains) into a tantivy
-  BM25 index under
+  array. Limit is 1–500. Default is 100.
+* **Indexed lexical search** (`index` + `query`): tree-sitter splits code
+  into chunks (symbols in Rust/Python/TypeScript/Go/Java/Nix, file-header
+  comment blocks, Markdown sections, sliding windows, 2-hop call-chains).
+  The chunks land in a tantivy BM25 index under
   `<workspace>/.one-grep/`.
-  Lexical window is 150 lines / 135 step; vector window is 50 / 40.
+  Lexical windows cover 150 lines with a 135-line step. Vector windows
+  cover 50 lines with a 40-line step.
 * **Hybrid retrieval** (`--hybrid`): MiniLM-class ONNX embeddings run
-  in-process via fastembed, fused with BM25 by RRF (fetch depth 50/side,
-  lexical 2x weight). Optional local cross-encoder rescore
+  in-process through fastembed. RRF fuses them with BM25 (fetch depth
+  50 per side, lexical weight 2x). An optional local cross-encoder
+  rescores the top results
   (`--rerank` / `--rank jina`, Jina v1-turbo top-20).
-* **MCP server** (`serve`): 6 tools over stdio or `127.0.0.1:3210/mcp`
-  (bearer token in `~/.one-grep/token`, mode 0600):
-  `search`, `search_ranked`, `definition`, `rg`, `skill`, `context`.
-* **Agent wiring** (`install`, Nix module): idempotent upsert of the
-  `one-grep` entry into 6 harnesses, preserving peer servers.
-* **Maintenance**: `watch` (2s-debounce re-sync), `embed` (model sync),
-  `dump-chunks` (JSONL for mining/eval), `eval` baseline.
+* **MCP server** (`serve`): 6 tools over stdio or HTTP on
+  `127.0.0.1:3210`. HTTP requires a bearer token
+  (`~/.one-grep/token`, mode 0600).
+  Tools: `search`, `search_ranked`, `definition`, `rg`, `skill`, `context`.
+* **Agent wiring** (`install`, Nix module): `install` upserts the
+  `one-grep` entry into 6 harnesses. It preserves peer servers. The
+  upsert is idempotent.
+* **Maintenance**: `watch` re-syncs with a 2s debounce. `embed` syncs
+  models. `dump-chunks` emits JSONL for mining and eval. `eval` runs
+  the baseline.
 
 ## Measured numbers
 
 Harness: `benchmarks/bench.py`, release binary, best-of-3 latency,
-recall@3. Corpus Runs 1–8: `nixos-config` copy (13 MB, `.git` excluded);
-Run 9: same repo grown to 22 MB / 217 files. `rg -l` file order is
-nondeterministic, so its recall jitters ±1.
+recall@3. Corpus Runs 1–8 use a `nixos-config` copy (13 MB, `.git`
+excluded). Run 9 uses the same repo grown to 22 MB / 217 files.
+`rg -l` file order is nondeterministic, so its recall jitters ±1.
 See `benchmarks/results.md` for full runs.
 
 | Query set | one-grep lexical | one-grep hybrid (MiniLM) | `rg -l` | `zg query --human` |
@@ -62,19 +68,19 @@ Model trade-off (Run 4, same corpus):
 
 Fine-tune note (Run 10, 1111 mined triples, 889 train / 223 held):
 pure-vector held R@1/R@3/R@10 base 0.37/0.52/0.66 → ft2 **0.52/0.67/0.78**.
-Scale case: Hipfire Rust monorepo (127 MB, 1013 `.rs` files) indexes ~40k
-chunks / 46k vectors.
+At scale, the Hipfire Rust monorepo (127 MB, 1013 `.rs` files) indexes
+~40k chunks and 46k vectors.
 
-Test suite: `cargo test --lib` — 80 passed, 0 failed (includes `rg`,
-`index`, `fuse`, `vectors`, `mcp`, `lsp`, `eval`).
+Test suite: `cargo test --lib` — 147 passed, 0 failed (covers retrieval,
+ranking, MCP tools, and eval).
 
 ## Requirements
 
 * Rust 1.85+ (`cargo build --release`), or Nix: `nix build .#one-grep`.
-* ONNX Runtime: Nix build links system `onnxruntime`; non-Nix builds use
-  the bundled fastembed runtime (first `embed` downloads the model to
-  `~/.cache/one-grep/`).
-* `rust-analyzer` on `PATH` only for the MCP `definition` tool.
+* ONNX Runtime: Nix builds link the system onnxruntime. Other builds use
+  the bundled fastembed runtime. The first `embed` downloads the model
+  to `~/.cache/one-grep/`.
+* Only the MCP `definition` tool needs `rust-analyzer` on `PATH`.
 
 ## Quickstart
 
@@ -99,19 +105,19 @@ Notes:
   of failing.
 * Rank backends (`--rank` / `search_ranked rank`): `jev` (hosted Nouls),
   `jina` (local ONNX cross-encoder, downloads on first use), `llama`
-  (llama.cpp server with `--rerank`, e.g. `bge-reranker-v2-m3` on Vulkan;
+  (llama.cpp server with `--rerank`, e.g. `bge-reranker-v2-m3` on Vulkan.
   endpoint `ONE_GREP_RERANK_URL` or `--rank-endpoint`, default
   `http://127.0.0.1:8080`). Load or endpoint failures fall back to
   retrieval order, never an error. Serve it with:
-  `llama-server -m bge-reranker-v2-m3-Q8_0.gguf --embedding --pooling rank`
-  (add `--device Vulkan` / `--n-gpu-layers all` on AMD; CPU works but a
-  20-doc pool takes tens of seconds).
-* `rg` is literal unless `--regex`. `query --rank jev` needs
-  `TYPESAFE_API_KEY` (else `~/.config/typesafe.env`), model
-  `JEV_MCP_MODEL` default `jev-1.13.0`; without a key it emits a
+  `llama-server -m bge-reranker-v2-m3-Q8_0.gguf --embedding --pooling rank`.
+  Add `--device Vulkan` / `--n-gpu-layers all` on AMD. On CPU a
+  20-doc pool takes tens of seconds.
+* Matching is literal unless you pass `--regex`. `query --rank jev` needs
+  `TYPESAFE_API_KEY` (else `~/.config/typesafe.env`). Model comes from
+  `JEV_MCP_MODEL`, default `jev-1.13.0`. Without a key the call emits a
   `rank: fallback` note.
-* `install --http` is valid for `opencode` only; otherwise stdio entries
-  using `~/.local/bin/one-grep` when present.
+* Use `--http` with `opencode` only. Other targets use stdio entries. The
+  installer uses `~/.local/bin/one-grep` when present.
 
 ## Agent install (fresh machine, ~2 min)
 
@@ -123,14 +129,15 @@ one-grep index ~/my-repo && one-grep embed ~/my-repo # first embed downloads Min
 one-grep query "where is auth handled?" --path ~/my-repo --hybrid
 ```
 
-No API key needed until `query --rank jev` / `search_ranked` with Jev;
-without one they emit `rank: fallback` and keep retrieval order.
+You need no API key until `query --rank jev` or `search_ranked` with Jev.
+Without a key they emit `rank: fallback` and keep retrieval order.
 
 ## MCP tools
 
 Server instructions: prefer `search_ranked` for intent (retrieve + Jev
-inside the tool, only top-k enters context), `search` for the raw fused
-pool, `rg` for exact text/symbols/regex. Cite `path:line` evidence.
+inside the tool, only top-k enters context). Use `search` for the raw
+fused pool. Use `rg` for exact text, symbols, or regex. Cite
+`path:start-end` evidence.
 
 Every hit cites `path:start-end`. To read more, read only the cited
 line range — never the whole file. If the range is insufficient, narrow
@@ -138,20 +145,21 @@ the query instead of widening the read.
 
 | Tool | Params | Returns |
 | :--- | :--- | :--- |
-| `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score) source=bm25\|vec\|bm25+vec\|rg` chunks (text capped, 1-line crumb); `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set; single tokens go BM25 |
+| `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score) source=bm25\|vec\|bm25+vec\|rg` chunks (text capped, 1-line crumb); `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless the caller passes `fts`; single tokens go BM25 |
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
 | `rg` | `root*`, `pattern*`, `regex?=false`, `structural?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `format?=text`, `limit?=100` (1–500) | `path:line:text` lines (or `{"notes","hits"}` with `format=json`), gitignore-aware |
 | `context` | `root*`, `path*`, `line*`, `format?=text` | enclosing symbol chunk (`path:start-end [breadcrumb] (kind)`) — expands a citation instead of a whole-file read |
-| `skill` | `task*`, `limit?=2` (1–5), `dir?`, `format?=text` | `name  /absolute/path/.../SKILL.md  (score)` plus one-line description; Jev ranks when a key is set, else lexical fallback (requires token overlap); never the SKILL.md body |
+| `skill` | `task*`, `limit?=2` (1–5), `dir?`, `format?=text` | `name  /absolute/path/.../SKILL.md  (score)` plus one-line description; Jev ranks when the caller sets a key, else lexical fallback (requires token overlap); never the SKILL.md body |
 
 ## Skill library
 
-Rarely used skills can live under `~/.local/share/agent-skills` (override with
-`ONE_GREP_SKILLS_DIR` or the MCP/CLI `dir` param): one folder per skill with a
-`SKILL.md` front matter (`name`, `description`). Harnesses that only load
-`~/.cursor/skills` (or similar) no longer pay for every skill on every turn —
-call `skill` with the task first, then read the winning absolute `SKILL.md` path yourself.
+Keep rarely used skills under `~/.local/share/agent-skills`. Override with
+`ONE_GREP_SKILLS_DIR` or the MCP/CLI `dir` param. Use one folder per skill
+with a `SKILL.md` front matter (`name`, `description`). Harnesses that load
+only `~/.cursor/skills` (or similar) skip loading every skill on every
+turn. Call `skill` with the task first. Then read the winning absolute
+`SKILL.md` path yourself.
 
 ## Install targets
 
@@ -168,70 +176,76 @@ Nix alternative: `nix build github:amitsheokand/one-grep` or import
 `homeManagerModules.one-grep` (`programs.one-grep.mcp.<target>.enable`).
 Details: [INTEGRATION.md](INTEGRATION.md), [nix/README.md](nix/README.md).
 
-How it is wired on a Pi / Home Manager laptop:
+How a Pi / Home Manager laptop wires it:
 [nixos-config `docs/coding-agent-stack.md`](https://github.com/amitsheokand/nixos-config/blob/main/docs/coding-agent-stack.md).
 
 ## Privacy
 
-* Embeddings run locally (fastembed ONNX); no embedding API is called.
-* `serve` HTTP binds `127.0.0.1` only and requires
+* Embeddings run locally through fastembed ONNX. The code calls no
+  embedding API.
+* In HTTP mode the server binds `127.0.0.1` only. It requires
   `Authorization: Bearer <token>`.
-* Only `search_ranked` / `query --rank jev` makes a network call, to the
-  configured Jev model; the key is never logged.
-* Every MCP call appends a JSONL row to `~/.one-grep/serving.log`
+* Only `search_ranked` / `query --rank jev` calls the network. It calls
+  the configured Jev model. It never logs the key.
+* Every MCP call appends one JSONL row to `~/.one-grep/serving.log`
   (`ONE_GREP_SERVING_LOG` overrides): tool, query, hits, chars, notes,
   latency. A pi extension (`~/.pi/agent/extensions/one-grep-hits.ts`,
-  experimental) logs search/read calls beside it so an offline join
-  answers "hits → did they still read the file?".
+  experimental) logs search and read calls beside it. An offline join of
+  the two logs answers "hits → did they still read the file?".
 
 ## Alternatives
 
-Honest substitutes, depending on which half of one-grep you need:
+Substitutes, depending on which half of one-grep you need. Each entry
+states where one-grep loses, with the measurement that earns the claim:
 
 * **Exact text search**: [ripgrep](https://github.com/BurntSushi/ripgrep) —
-  the baseline. one-grep's `rg` will never beat it on raw latency
-  (Run 9: 2.1 ms vs 7.2 ms); use `rg` when you know the literal text.
+  ripgrep is the baseline. one-grep's `rg` never beats it on raw latency.
+  Run 9 measured 2.1 ms against 7.2 ms. Use `rg` when you know the
+  literal text.
 * **Structural search**: [ast-grep](https://github.com/ast-grep/ast-grep)
-  (Rust, tree-sitter) — matches AST shape instead of text
+  (Rust, tree-sitter) — it matches AST shape instead of text
   (`$A && $A()` patterns, rewrite rules). one-grep does not reimplement
-  this: `rg --structural -p 'pattern' --lang rust` and
+  this. `rg --structural -p 'pattern' --lang rust` and
   `query --hybrid --ast 'pattern' --ast-lang rust` shell out to the
-  `ast-grep` binary when present (fused as a third RRF list, tagged
-  `source=ast`) and fail closed when absent.
+  `ast-grep` binary when present. The hits fuse as a third RRF list
+  tagged `source=ast`. Without the binary the call fails closed.
 * **Hybrid codebase search**: `zg` (`zvec-grep`, Node/TypeScript cousin)
-  — same BM25+vector idea, ~250 ms
-  per query in our bench vs ~70–200 ms for one-grep hybrid. one-grep is
-  the faster native port with the in-tree MCP server.
+  — it follows the same BM25+vector idea. Our bench measured ~250 ms
+  per query against ~70–200 ms for one-grep hybrid. one-grep is the
+  faster native port. It includes the in-tree MCP server.
 * **Structural search over MCP**: [ast-grep-mcp](https://github.com/ast-grep/ast-grep-mcp)
   — the ast-grep team's own MCP server. Use it side-by-side when agents
-  need deep structural rules; use one-grep's `search` for intent and
+  need deep structural rules. Use one-grep's `search` for intent and
   `rg --structural` for one-off shape queries.
-* **Judges**: [Laya](https://github.com/NandhaKishorM/laya) (local, calibrated
-  Nouls; trialed as our ranker via `TYPESAFE_BASE_URL`, Run 14) and
-  [CLM](https://github.com/Contrastive-LM/CLM) (faster on NVIDIA, relative
-  scores; tracked for its hard-negative training recipe, Run 15).
+* **Judges**: [Laya](https://github.com/NandhaKishorM/laya) serves local,
+  calibrated Nouls. We measured Laya as our ranker through
+  `TYPESAFE_BASE_URL` (Run 14).
+  [CLM](https://github.com/Contrastive-LM/CLM) runs faster on NVIDIA
+  with relative scores. We track it for its hard-negative training
+  recipe (Run 15).
 * **Combined engines**: [`ox-core`](https://crates.io/crates/ox-core)
   (`ox-codes`) — ripgrep + tree-sitter + ast-grep as an HTTP service
-  with rewrite and dataflow analysis. Heavier than one-grep; pick it
-  when you need rewrite/codemod, not just retrieval.
+  with rewrite and dataflow analysis. It is heavier than one-grep. Pick
+  it when you need rewrite or codemod, not just retrieval.
 * **Jev ranking backend**: the default is the hosted
   [TypeSafe Jev API](https://typesafe.ai/) (`TYPESAFE_API_KEY`). Local
   options speak the same `POST /v1/systemone` wire protocol, selectable
-  via `TYPESAFE_BASE_URL`:
+  through `TYPESAFE_BASE_URL`:
   * [LocalJev](https://github.com/githubnext/localjev) — Bun +
     DiffusionGemma through an OpenAI-compatible endpoint (oMLX).
-    Wire-compatible, but probabilities are prompted/self-reported rather
-    than logit-read, so check calibration on your workload before
-    trusting low-`exists` bands.
+    It is wire-compatible. The model reports its own probabilities
+    instead of reading logits. Check calibration on your workload
+    before you trust low-`exists` bands.
   * [OpenJev](https://github.com/razorback16/openjev) — patched vLLM
-    backend with a structured logit read; needs NVIDIA hardware.
+    backend with a structured logit read. It needs NVIDIA hardware.
 * **Local rerank without Jev at all**: `query --rerank` / `--rank jina` / `--rank llama` (llama.cpp `--rerank` server)
-  rescores with an on-device Jina cross-encoder — no key, no network,
-  ~1.1 s per query. In our bench it sweeps keywords (10/10) but adds
-  nothing on paraphrased concepts (0/4).
+  rescores on-device (Jina cross-encoder or a llama.cpp server). It needs
+  no key and no network. Our bench measured ~1.1 s per query. In our bench it sweeps
+  keywords (10/10). It adds nothing on paraphrased concepts (0/4).
 
 ## Docs
 
-* Architecture, CLI table, harness JSON shapes: [INTEGRATION.md](INTEGRATION.md)
-* Nix module/overlay: [nix/README.md](nix/README.md)
-* Benchmarks, ablations, fine-tune: [benchmarks/results.md](benchmarks/results.md)
+* Architecture, CLI table, and harness JSON shapes live in [INTEGRATION.md](INTEGRATION.md).
+* Nix module and overlay live in [nix/README.md](nix/README.md).
+* Benchmarks, ablations, and fine-tune notes live in [benchmarks/results.md](benchmarks/results.md).
+* Build history (packets, receipts, task lists) lives in [docs/dev/](docs/dev/).
