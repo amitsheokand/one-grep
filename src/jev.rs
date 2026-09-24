@@ -21,7 +21,7 @@ use crate::{Error, embed::Rerank, fuse::FusedHit};
 pub const ENV_API_KEY: &str = "TYPESAFE_API_KEY";
 const DOTENV_REL: &str = ".config/typesafe.env";
 const ENVIRONMENTD_REL: &str = ".config/environment.d/60-typesafe.conf";
-const ENV_BASE_URL: &str = "TYPESAFE_BASE_URL";
+pub(crate) const ENV_BASE_URL: &str = "TYPESAFE_BASE_URL";
 const ENV_MODEL: &str = "JEV_MCP_MODEL";
 const DEFAULT_BASE_URL: &str = "https://api.typesafe.ai";
 const DEFAULT_MODEL: &str = "jev-1.13.0";
@@ -40,7 +40,7 @@ pub struct RankStatus {
 }
 
 impl RankStatus {
-    fn jev(exists: Option<f64>) -> Self {
+    pub(crate) fn jev(exists: Option<f64>) -> Self {
         // Per-action setpoint lives next to the reading: below 0.30 the
         // shortlist is returned unchanged but flagged low-confidence, so a
         // caller scales to warn/verify instead of auto-acting.
@@ -56,7 +56,7 @@ impl RankStatus {
         }
     }
 
-    fn fallback(reason: &str) -> Self {
+    pub(crate) fn fallback(reason: &str) -> Self {
         Self {
             mode: "fallback",
             note: format!("rank: fallback ({reason})"),
@@ -201,7 +201,7 @@ impl JevReranker {
         })
     }
 
-    fn evaluate(&self, state: Value, questions: Value) -> Result<Value, Error> {
+    pub(crate) fn evaluate(&self, state: Value, questions: Value) -> Result<Value, Error> {
         let url = format!("{}/v1/systemone", self.base_url);
         let body = json!({
             "state": state,
@@ -276,7 +276,7 @@ impl Rerank for JevReranker {
 /// (query + candidate list) but must not read each other's answers: every
 /// per-candidate instruction judges that candidate alone, never by rank
 /// against the others. A missing Noul fails closed to 0.0.
-fn rerank_nouls(
+pub(crate) fn rerank_nouls(
     query: &str,
     docs: &[&str],
     mut evaluate: impl FnMut(Value, Value) -> Result<Value, Error>,

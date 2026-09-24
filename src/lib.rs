@@ -18,6 +18,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod rg;
 pub mod route;
+pub mod skill;
 pub mod vectors;
 pub mod watch;
 

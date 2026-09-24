@@ -35,6 +35,7 @@ one-grep <COMMAND>
 | `rg` | `<pattern> [<path>] [--regex] [--case-insensitive] [--limit <n>]` | Instant gitignore-aware text/regex search directly over files without indexing. |
 | `serve` | `[--stdio] [--port 3210]` | Serves the Model Context Protocol (MCP) server over stdio or Streamable HTTP on loopback `127.0.0.1:<port>/mcp`. |
 | `install` | `[--target opencode/cursor/pi/muse/hermes/command-code] [--http] [--port 3210]` | Idempotent upsert of `one-grep` MCP stdio entry into the harness config (`--http` only for `opencode`). |
+| `skill` | `"<task>" [--dir <path>] [--limit N] [--json]` | Route a task to the best matching skill under `ONE_GREP_SKILLS_DIR` or `~/.local/share/agent-skills` (Jev when keyed, else lexical fallback). |
 
 ---
 
@@ -53,7 +54,7 @@ Writes/upserts the `one-grep` entry shapes documented in §4 (stdio → `~/.loca
 
 ## 3. MCP Surface (`src/mcp.rs`)
 
-The MCP server exposes three tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
+The MCP server exposes search, definition, `rg`, and `skill` tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
 
 ### Server Instructions
 > "Local-first hybrid workspace search. Prefer `search_ranked` for intent (retrieve + Jev inside the tool; only top-k winners enter context). Use `search` for the raw fused pool. Use `rg` for exact text, symbols, or regex. Cite path:line evidence."
