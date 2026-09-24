@@ -287,6 +287,17 @@ fn log_call(
 
 /// Caller errors (unknown `--lang`, bad glob) are `invalid_params`; engine
 /// failures stay `internal_error`. Fails closed either way.
+fn err_class(e: &McpError) -> &'static str {
+    use rmcp::model::ErrorCode;
+    if e.code == ErrorCode::INVALID_PARAMS {
+        "invalid_params"
+    } else if e.code == ErrorCode::INTERNAL_ERROR {
+        "internal"
+    } else {
+        "other"
+    }
+}
+
 fn rg_error(e: crate::Error) -> McpError {
     match e {
         crate::Error::InvalidInput(msg) => McpError::invalid_params(msg, None),
@@ -318,8 +329,19 @@ fn resolve_in_root(root: &Path, raw: &str) -> Option<PathBuf> {
     normal.starts_with(root).then_some(normal)
 }
 
+/// Root-relative display for text output: saves tokens on every hit
+/// line, zero information lost (the caller passed `root`). Falls back to
+/// absolute when the path escapes the root (external definitions).
+/// JSON envelopes keep absolute paths: machines parse those, and exactness
+/// beats brevity there.
+fn rel(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .map(|r| r.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
 fn render(
-    hit_path: &Path,
+    shown_path: &str,
     start: u64,
     end: u64,
     breadcrumb: &str,
@@ -340,10 +362,7 @@ fn render(
         .chars()
         .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
         .collect();
-    format!(
-        "{}:{start}-{end} [{crumb}] ({score}) source={source}\n{short}",
-        hit_path.display()
-    )
+    format!("{shown_path}:{start}-{end} [{crumb}] ({score}) source={source}\n{short}")
 }
 
 fn provider() -> Result<&'static FastembedProvider, McpError> {
@@ -470,7 +489,7 @@ impl OneGrep {
 
     #[tool(
         title = "Hybrid workspace search",
-        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Single identifier tokens go BM25, never hybrid. `lang`/`globs` filter hits on every path. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed.",
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Quoted literals, foo::Bar paths, and single tokens route to exact lookup. Falls back to BM25, then live rg.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -482,6 +501,24 @@ impl OneGrep {
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.root.clone(), p.query.clone());
+        let r = self.search_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "search",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn search_inner(&self, p: SearchParams) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
         let format = Format::opt(p.format);
@@ -529,7 +566,7 @@ impl OneGrep {
                         );
                         return Ok(text_block(envelope));
                     }
-                    let lines: Vec<String> = hits.iter().map(render_ranked).collect();
+                    let lines: Vec<String> = hits.iter().map(|h| render_ranked(&root, h)).collect();
                     let body = lines.join("\n---\n");
                     let text = if notes.is_empty() {
                         body
@@ -561,7 +598,7 @@ impl OneGrep {
                     );
                     return Ok(text_block(envelope));
                 }
-                let lines: Vec<String> = hits.iter().map(render_live).collect();
+                let lines: Vec<String> = hits.iter().map(|h| render_live(&root, h)).collect();
                 let body = lines.join("\n---\n");
                 let text = format!("{}\n\n{body}", notes.join("\n"));
                 log_call(
@@ -648,7 +685,7 @@ impl OneGrep {
             );
             return Ok(text_block(envelope));
         }
-        let lines: Vec<String> = fused.iter().map(render_fused).collect();
+        let lines: Vec<String> = fused.iter().map(|h| render_fused(&root, h)).collect();
         let body = lines.join("\n---\n");
         let text = if notes.is_empty() {
             body
@@ -669,7 +706,7 @@ impl OneGrep {
 
     #[tool(
         title = "Ranked hybrid search",
-        description = "Intent search with Jev ranking inside the tool: retrieve a shortlist, score each candidate, return top-k only. Pool never enters context. Falls back to unranked retrieval if Jev is unavailable. Exact anchors still belong on `rg`.",
+        description = "Intent search with Jev ranking inside the tool: top-k only. Falls back to unranked retrieval if Jev is unavailable.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -681,6 +718,24 @@ impl OneGrep {
         &self,
         Parameters(p): Parameters<SearchParams>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.root.clone(), p.query.clone());
+        let r = self.search_ranked_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "search_ranked",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn search_ranked_inner(&self, p: SearchParams) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let limit = p.limit.unwrap_or(10).clamp(1, 50);
         let format = Format::opt(p.format);
@@ -817,7 +872,7 @@ impl OneGrep {
         }
         let body = hits
             .iter()
-            .map(render_fused)
+            .map(|h| render_fused(&root, h))
             .collect::<Vec<_>>()
             .join("\n---\n");
         let text = format!("{}\n\n{body}", notes.join("\n"));
@@ -847,6 +902,24 @@ impl OneGrep {
         &self,
         Parameters(p): Parameters<DefinitionParams>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.root.clone(), p.path.clone());
+        let r = self.definition_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "definition",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn definition_inner(&self, p: DefinitionParams) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let started = std::time::Instant::now();
         let file = resolve_in_root(&root, &p.path).ok_or_else(|| {
@@ -869,7 +942,7 @@ impl OneGrep {
         if targets.is_empty() {
             let note = format!(
                 "no definition found at {}:{}:{} (rust-analyzer)",
-                file.display(),
+                rel(&root, &file),
                 p.line,
                 p.character
             );
@@ -918,7 +991,7 @@ impl OneGrep {
                 };
                 format!(
                     "{}:{}-{} ({scope})",
-                    t.path.display(),
+                    rel(&root, &t.path),
                     t.start_line,
                     t.end_line
                 )
@@ -951,6 +1024,24 @@ impl OneGrep {
         &self,
         Parameters(p): Parameters<ContextParams>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.root.clone(), p.path.clone());
+        let r = self.context_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "context",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn context_inner(&self, p: ContextParams) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
         let started = std::time::Instant::now();
         let file = resolve_in_root(&root, &p.path).ok_or_else(|| {
@@ -964,7 +1055,7 @@ impl OneGrep {
         let Some(chunk) = chunk else {
             let note = format!(
                 "no enclosing symbol at {}:{}; read the cited range",
-                file.display(),
+                rel(&root, &file),
                 p.line
             );
             if let Some(envelope) = format.envelope(&[note.clone()], &Vec::<String>::new()) {
@@ -991,7 +1082,7 @@ impl OneGrep {
         };
         let text = format!(
             "{}:{}-{} [{}] ({})\n{}",
-            chunk.path.display(),
+            rel(&root, &chunk.path),
             chunk.start,
             chunk.end,
             chunk.breadcrumb,
@@ -1012,7 +1103,7 @@ impl OneGrep {
 
     #[tool(
         title = "Ripgrep search",
-        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, typescript, go, java, nix, markdown); `globs` are include globs (`!` negates). `structural` runs the pattern through ast-grep instead (needs exactly one `lang`).",
+        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits, literal unless `regex` is true.",
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -1021,6 +1112,24 @@ impl OneGrep {
         )
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.root.clone(), p.pattern.clone());
+        let r = self.rg_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "rg",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn rg_inner(&self, p: RgParams) -> Result<CallToolResult, McpError> {
         // `rg` accepts a file or a directory as root (ripgrep semantics):
         // harnesses sometimes map a file `path` onto the workspace slot.
         // Every other tool still requires a directory via `check_root`.
@@ -1078,7 +1187,7 @@ impl OneGrep {
                 .map(|h| {
                     format!(
                         "{}:{}:{}",
-                        h.path.display(),
+                        rel(&root, &h.path),
                         h.line,
                         h.text.lines().next().unwrap_or("")
                     )
@@ -1109,7 +1218,7 @@ impl OneGrep {
         }
         let lines: Vec<String> = hits
             .iter()
-            .map(|h| format!("{}:{}:{}", h.path.display(), h.line, h.text))
+            .map(|h| format!("{}:{}:{}", rel(&root, &h.path), h.line, h.text))
             .collect();
         let text = lines.join("\n");
         log_call(
@@ -1138,6 +1247,24 @@ impl OneGrep {
         &self,
         Parameters(p): Parameters<SkillParams>,
     ) -> Result<CallToolResult, McpError> {
+        let started = std::time::Instant::now();
+        let ctx = (p.dir.clone().unwrap_or_default(), p.task.clone());
+        let r = self.skill_inner(p).await;
+        if let Err(e) = &r {
+            log_call(
+                "skill",
+                &ctx.0,
+                &ctx.1,
+                0,
+                0,
+                &[format!("error[{}]: {}", err_class(e), redact(&e.message))],
+                started.elapsed().as_secs_f64(),
+            );
+        }
+        r
+    }
+
+    async fn skill_inner(&self, p: SkillParams) -> Result<CallToolResult, McpError> {
         let started = std::time::Instant::now();
         let limit = p.limit.unwrap_or(2).clamp(1, 5);
         let dir_for_log = p.dir.clone().unwrap_or_default();
@@ -1215,9 +1342,9 @@ impl HitFilter {
     }
 }
 
-fn render_ranked(h: &index::RankedHit) -> String {
+fn render_ranked(root: &Path, h: &index::RankedHit) -> String {
     render(
-        &h.path,
+        &rel(root, &h.path),
         h.start,
         h.end,
         &h.breadcrumb,
@@ -1227,9 +1354,9 @@ fn render_ranked(h: &index::RankedHit) -> String {
     )
 }
 
-fn render_fused(h: &fuse::FusedHit) -> String {
+fn render_fused(root: &Path, h: &fuse::FusedHit) -> String {
     render(
-        &h.path,
+        &rel(root, &h.path),
         h.start,
         h.end,
         &h.breadcrumb,
@@ -1239,9 +1366,9 @@ fn render_fused(h: &fuse::FusedHit) -> String {
     )
 }
 
-fn render_live(h: &rg::Hit) -> String {
+fn render_live(root: &Path, h: &rg::Hit) -> String {
     render(
-        &h.path,
+        &rel(root, &h.path),
         h.line,
         h.line,
         "rg-fallback",
@@ -1260,13 +1387,12 @@ impl rmcp::ServerHandler for OneGrep {
         // consumer restart; the version makes staleness visible).
         info.server_info.version = env!("CARGO_PKG_VERSION").to_owned();
         info.instructions = Some(
-            "Local-first hybrid workspace search. Prefer `search_ranked` for intent \
-             (retrieve + Jev inside the tool; only top-k winners enter context). \
-             Use `search` for the raw fused pool. Use `rg` for exact text, symbols, \
-             or regex. Use `definition` to jump from a Rust reference to its \
-             definition. Need a specialized skill (API docs, domain workflow)? Call \
-             `skill` with the task first. Cite path:start-end evidence; to read more, \
-             read only the cited line range — or call `context` with the cited line for its enclosing symbol — never the whole file."
+            "Local-first hybrid workspace search. `search_ranked` retrieves and \
+             ranks inside the tool (top-k only). `search` returns the raw fused \
+             pool. `rg` does exact text, symbols, or regex. `definition` jumps \
+             to a Rust definition. `skill` routes to agent skills. `context` \
+             expands a citation to its enclosing symbol. Cite path:start-end; \
+             read only cited ranges."
                 .into(),
         );
         info
@@ -1704,7 +1830,12 @@ mod tests {
             crate::fuse::collect(workspace.path(), "canary query terms here", 5, false, None)
                 .expect("collect")
                 .iter()
-                .map(|h| h.path.to_string_lossy().into_owned())
+                .map(|h| {
+                    h.path
+                        .strip_prefix(workspace.path())
+                        .map(|r| r.to_string_lossy().into_owned())
+                        .unwrap_or_else(|_| h.path.to_string_lossy().into_owned())
+                })
                 .collect();
         let result = OneGrep::new()
             .search_ranked(Parameters(SearchParams {
@@ -2156,6 +2287,50 @@ mod tests {
             "/home/alice/ws passwordless login"
         );
         assert_eq!(redact("plain query text"), "plain query text");
+    }
+
+    /// Errors log with class: per-tool rates separate caller mistakes
+    /// from harness bugs.
+    #[tokio::test]
+    async fn serving_log_records_error_class() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("serving.log");
+        // SAFETY: unique path in this var; no other test reads it.
+        unsafe {
+            std::env::set_var(ENV_SERVING_LOG, log.to_string_lossy().into_owned());
+        }
+        let err = OneGrep::new()
+            .search(Parameters(SearchParams {
+                root: "/no/such/workspace".into(),
+                query: "x".into(),
+                fts: None,
+                fuse: None,
+                rank: None,
+                lang: None,
+                globs: None,
+                ast_pattern: None,
+                ast_lang: None,
+                format: None,
+                limit: None,
+            }))
+            .await
+            .expect_err("bad root must fail");
+        assert!(err.message.contains("not a directory"));
+        unsafe {
+            std::env::remove_var(ENV_SERVING_LOG);
+        }
+        let content = std::fs::read_to_string(&log).expect("log written");
+        let row: serde_json::Value = serde_json::from_str(content.trim()).expect("json row");
+        assert_eq!(row["tool"], "search");
+        assert_eq!(row["hits"], 0);
+        let notes = row["notes"].as_array().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0]
+                .as_str()
+                .unwrap()
+                .starts_with("error[invalid_params]:")
+        );
     }
 
     /// Serving log: one JSONL row per call, opt-out path via env.

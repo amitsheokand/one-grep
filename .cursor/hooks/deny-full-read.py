@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""Cursor/Muse beforeReadFile gate: deny unbounded reads of large files.
+"""beforeReadFile gate for whole-file reads (Cursor/Muse hook shape).
 
 A whole-file read of a large file is the 91% tool doing the most damage:
-every line gets repaid on later turns. This hook allows the read only when
-it is bounded (offset/limit present) or the file is small. Denials carry
-an agent_message pointing at ranged reads, so the agent retries narrow
-instead of failing.
+every line gets repaid on later turns. Modes via ONE_GREP_READ_GATE:
 
-Fail open everywhere: unknown payload shapes, missing files, and hook
-errors all allow the read through. Exit 0 always; the permission field
-carries the decision (exit code 2 would also block, but explicit JSON
-is friendlier to review).
+- unset or "observe" (default): log the decision, allow everything.
+  Observe first; enforce only after the log says the rule fires cleanly.
+- "enforce": deny unbounded reads over the limit, with an agent_message
+  pointing at ranged reads.
+- "off" or "0": allow silently, log nothing.
+
+Decisions append as JSONL to ~/.pi/agent/obs/read-gate.log so an offline
+join measures what enforcing would have blocked. Fail open everywhere:
+unknown payloads, missing files, and hook errors all allow the read.
 """
 
 import json
 import os
 import sys
+import time
 
 # Mirrors toolgate's WHOLE_FILE_LIMIT_LINES: one budget, two enforcers.
 WHOLE_FILE_LIMIT_LINES = 400
@@ -64,6 +67,37 @@ def deny(total, path):
     )
 
 
+def log_decision(path, total, bounded, decision):
+    try:
+        home = os.environ.get("HOME", "")
+        if not home:
+            return
+        row = {
+            "ts": time.time(),
+            "path": path,
+            "lines": total,
+            "bounded": bounded,
+            "decision": decision,
+        }
+        with open(f"{home}/.pi/agent/obs/read-gate.log", "a") as handle:
+            handle.write(json.dumps(row) + "\n")
+    except Exception:
+        pass
+
+
+def decide(path, bounded, total):
+    mode = os.environ.get("ONE_GREP_READ_GATE", "observe")
+    if mode in ("off", "0"):
+        return "allow", False
+    if bounded or total <= WHOLE_FILE_LIMIT_LINES:
+        log_decision(path, total, bounded, "allow")
+        return "allow", True
+    log_decision(path, total, bounded, "deny" if mode == "enforce" else "would-deny")
+    if mode == "enforce":
+        return "deny", True
+    return "allow", True
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -80,17 +114,15 @@ def main():
             outer_input = payload.get("tool_input", {})
         path = extract_str(outer_input, "path", "file_path", "file", "filename")
         if path is None:
-            # Also accept a bare path argument shape.
             path = extract_str(payload, "path", "file_path", "file")
         if path is None:
             allow()
             return
-        if extract_num(outer_input, "offset", "start", "offset_lines") is not None:
-            allow()  # bounded read: has a start
-            return
-        if extract_num(outer_input, "limit", "end", "limit_lines", "count") is not None:
-            allow()  # bounded read: has an end
-            return
+        bounded = (
+            extract_num(outer_input, "offset", "start", "offset_lines") is not None
+            or extract_num(outer_input, "limit", "end", "limit_lines", "count")
+            is not None
+        )
         try:
             total = 0
             with open(path, "rb") as handle:
@@ -101,17 +133,14 @@ def main():
         except OSError:
             allow()  # let the read tool report missing files itself
             return
-        if total <= WHOLE_FILE_LIMIT_LINES:
+        verdict, _logged = decide(path, bounded, total)
+        if verdict == "deny":
+            deny(total, path)
+        else:
             allow()
-            return
-        deny(total, path)
     except Exception:
         allow()
 
 
 if __name__ == "__main__":
-    # Live pilot: gate is on unless explicitly disabled per-machine.
-    if os.environ.get("ONE_GREP_READ_GATE", "1") == "0":
-        allow()
-    else:
-        main()
+    main()
