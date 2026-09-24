@@ -117,7 +117,7 @@ Notes:
 
 ```bash
 cargo install --git https://github.com/amitsheokand/one-grep
-one-grep --version                                   # expect one-grep 0.1.0
+one-grep --version                                   # expect one-grep 0.2.0
 one-grep install --target opencode                   # or cursor|pi|muse|hermes|command-code
 one-grep index ~/my-repo && one-grep embed ~/my-repo # first embed downloads MiniLM once
 one-grep query "where is auth handled?" --path ~/my-repo --hybrid
