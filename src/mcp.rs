@@ -1048,7 +1048,7 @@ impl rmcp::ServerHandler for OneGrep {
              or regex. Use `definition` to jump from a Rust reference to its \
              definition. Need a specialized skill (API docs, domain workflow)? Call \
              `skill` with the task first. Cite path:start-end evidence; to read more, \
-             read only the cited line range \u2014 or call `context` with the cited line for its enclosing symbol \u2014 never the whole file."
+             read only the cited line range — or call `context` with the cited line for its enclosing symbol — never the whole file."
                 .into(),
         );
         info
