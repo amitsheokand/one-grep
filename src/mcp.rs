@@ -708,7 +708,8 @@ impl rmcp::ServerHandler for OneGrep {
              (retrieve + Jev inside the tool; only top-k winners enter context). \
              Use `search` for the raw fused pool. Use `rg` for exact text, symbols, \
              or regex. Use `definition` to jump from a Rust reference to its \
-             definition. Cite path:line evidence."
+             definition. Cite path:start-end evidence; to read more, read only \
+             the cited line range, never the whole file."
                 .into(),
         );
         info

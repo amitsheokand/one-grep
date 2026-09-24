@@ -130,6 +130,10 @@ Server instructions: prefer `search_ranked` for intent (retrieve + Jev
 inside the tool, only top-k enters context), `search` for the raw fused
 pool, `rg` for exact text/symbols/regex. Cite `path:line` evidence.
 
+Every hit cites `path:start-end`. To read more, read only the cited
+line range — never the whole file. If the range is insufficient, narrow
+the query instead of widening the read.
+
 | Tool | Params | Returns |
 | :--- | :--- | :--- |
 | `search` | `root*`, `query*`, `fts?`, `fuse?=true`, `lang?`, `globs?`, `limit?=10` (1–50) | `path:start-end [breadcrumb] (score) source=bm25\|vec\|bm25+vec\|rg` chunks (text capped, 1-line crumb); `foo::Bar` and `"quoted"` / `'quoted'` route to exact `rg` unless `fts` is set; single tokens go BM25 |
