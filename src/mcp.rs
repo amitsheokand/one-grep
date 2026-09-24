@@ -77,6 +77,25 @@ fn internal(e: impl std::fmt::Display) -> McpError {
 /// Env override for the serving-log path (tests point it at a tmp file).
 pub const ENV_SERVING_LOG: &str = "ONE_GREP_SERVING_LOG";
 
+#[cfg(test)]
+thread_local! {
+    static TEST_SERVING_LOG: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn with_test_serving_log(path: &Path, f: impl FnOnce()) {
+    TEST_SERVING_LOG.with(|slot| {
+        *slot.borrow_mut() = Some(path.to_path_buf());
+        f();
+        *slot.borrow_mut() = None;
+    });
+}
+
+#[cfg(test)]
+fn test_serving_log_path() -> Option<PathBuf> {
+    TEST_SERVING_LOG.with(|slot| slot.borrow().clone())
+}
+
 /// Redact emails and key-like secrets from text bound for the serving log.
 /// The log must stay joinable, so paths are left alone — only free text
 /// (queries, error notes) passes through here.
@@ -216,11 +235,23 @@ fn log_call(
     notes: &[String],
     latency_ms: f64,
 ) {
-    let explicit = std::env::var_os(ENV_SERVING_LOG).map(PathBuf::from);
-    if cfg!(test) && explicit.is_none() {
-        return;
-    }
-    let path = explicit.or_else(|| {
+    let path = {
+        #[cfg(test)]
+        {
+            if let Some(p) = test_serving_log_path() {
+                Some(p)
+            } else if std::env::var_os(ENV_SERVING_LOG).is_none() {
+                return;
+            } else {
+                std::env::var_os(ENV_SERVING_LOG).map(PathBuf::from)
+            }
+        }
+        #[cfg(not(test))]
+        {
+            std::env::var_os(ENV_SERVING_LOG).map(PathBuf::from)
+        }
+    };
+    let path = path.or_else(|| {
         std::env::var_os("HOME")
             .map(PathBuf::from)
             .map(|h| h.join(".one-grep").join("serving.log"))
@@ -438,7 +469,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Single identifier tokens go BM25, never hybrid. `lang`/`globs` filter hits on every path. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed."
+        title = "Hybrid workspace search",
+        description = "Hybrid workspace search for intent and concepts, ranked with file:line cites. Standalone Rust paths (foo::Bar) and quoted literals (\"...\" / '...') use exact rg lookup unless fts anchors are supplied. Single identifier tokens go BM25, never hybrid. `lang`/`globs` filter hits on every path. Falls back to BM25 when no vector store exists, and to live rg when the workspace is not indexed.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn search(
         &self,
@@ -630,7 +668,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Intent search with Jev ranking inside the tool: retrieve a shortlist, score each candidate, return top-k only. Pool never enters context. Falls back to unranked retrieval if Jev is unavailable. Exact anchors still belong on `rg`."
+        title = "Ranked hybrid search",
+        description = "Intent search with Jev ranking inside the tool: retrieve a shortlist, score each candidate, return top-k only. Pool never enters context. Falls back to unranked retrieval if Jev is unavailable. Exact anchors still belong on `rg`.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn search_ranked(
         &self,
@@ -789,7 +834,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Rust definition navigation via rust-analyzer: jump from a reference to its definition. Takes a 1-based line and character. Returns path:line evidence; targets outside the workspace are marked external. Needs saved files and a resolvable rust-analyzer."
+        title = "Go to definition",
+        description = "Rust definition navigation via rust-analyzer: jump from a reference to its definition. Takes a 1-based line and character. Returns path:line evidence; targets outside the workspace are marked external. Needs saved files and a resolvable rust-analyzer.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn definition(
         &self,
@@ -886,7 +938,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Expand a citation to its enclosing symbol: smallest chunk containing path:line (function, struct, section, or window). Replaces a whole-file read after a search hit. No enclosing symbol (binary, generated, out of range) is an explanatory note, not an error."
+        title = "Symbol context window",
+        description = "Expand a citation to its enclosing symbol: smallest chunk containing path:line (function, struct, section, or window). Replaces a whole-file read after a search hit. No enclosing symbol (binary, generated, out of range) is an explanatory note, not an error.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn context(
         &self,
@@ -952,7 +1011,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, typescript, go, java, nix, markdown); `globs` are include globs (`!` negates). `structural` runs the pattern through ast-grep instead (needs exactly one `lang`)."
+        title = "Ripgrep search",
+        description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, typescript, go, java, nix, markdown); `globs` are include globs (`!` negates). `structural` runs the pattern through ast-grep instead (needs exactly one `lang`).",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
         let root = check_root(&p.root)?;
@@ -1044,7 +1110,14 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Route a task to the best matching agent skill from the on-disk skill library. Jev ranks inside the tool when a TypeSafe key is configured; otherwise lexical fallback with overlap floor. Returns skill name, absolute path to SKILL.md, score, and a one-line description — never the skill body."
+        title = "Skill library lookup",
+        description = "Route a task to the best matching agent skill from the on-disk skill library. Jev ranks inside the tool when a TypeSafe key is configured; otherwise lexical fallback with overlap floor. Returns skill name, absolute path to SKILL.md, score, and a one-line description — never the skill body.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true
+        )
     )]
     async fn skill(
         &self,
@@ -1259,6 +1332,20 @@ mod tests {
     #[test]
     fn tool_router_lists_skill() {
         assert!(OneGrep::new().tool_router.map.contains_key("skill"));
+    }
+
+    #[test]
+    fn every_tool_declares_read_only_hint() {
+        let tools = OneGrep::new().tool_router.list_all();
+        assert!(!tools.is_empty(), "expected at least one MCP tool");
+        for tool in tools {
+            assert_eq!(
+                tool.annotations.as_ref().and_then(|a| a.read_only_hint),
+                Some(true),
+                "tool {:?} must set annotations(read_only_hint = true)",
+                tool.name
+            );
+        }
     }
 
     #[tokio::test]
@@ -2005,32 +2092,29 @@ mod tests {
     fn serving_log_concurrent_appends_stay_whole() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = dir.path().join("serving.log");
-        // SAFETY:unique path in this var; serializes with the lock below.
-        unsafe {
-            std::env::set_var(ENV_SERVING_LOG, log.to_string_lossy().into_owned());
-        }
+        let log_path = log.clone();
         let handles: Vec<_> = (0..8)
             .map(|t| {
+                let log_path = log_path.clone();
                 std::thread::spawn(move || {
-                    for i in 0..25 {
-                        log_call(
-                            "rg",
-                            "/ws",
-                            &format!("query {t}-{i} padded padding"),
-                            1,
-                            10,
-                            &[],
-                            0.5,
-                        );
-                    }
+                    with_test_serving_log(&log_path, || {
+                        for i in 0..25 {
+                            log_call(
+                                "rg",
+                                "/ws",
+                                &format!("query {t}-{i} padded padding"),
+                                1,
+                                10,
+                                &[],
+                                0.5,
+                            );
+                        }
+                    });
                 })
             })
             .collect();
         for h in handles {
             h.join().expect("thread");
-        }
-        unsafe {
-            std::env::remove_var(ENV_SERVING_LOG);
         }
         let content = std::fs::read_to_string(&log).expect("log written");
         let lines: Vec<&str> = content.lines().collect();
@@ -2065,15 +2149,13 @@ mod tests {
     async fn serving_log_appends_json_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = dir.path().join("serving.log");
-        // SAFETY: unique path in this var; no other test reads it.
-        unsafe {
-            std::env::set_var(ENV_SERVING_LOG, log.to_string_lossy().into_owned());
-        }
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("a.txt"), "logged_token here\n").expect("fixture");
+        let root = workspace.path().to_string_lossy().into_owned();
+        TEST_SERVING_LOG.with(|slot| *slot.borrow_mut() = Some(log.clone()));
         OneGrep::new()
             .rg(Parameters(RgParams {
-                root: workspace.path().to_string_lossy().into_owned(),
+                root,
                 pattern: "logged_token".into(),
                 regex: None,
                 structural: None,
@@ -2085,9 +2167,7 @@ mod tests {
             }))
             .await
             .expect("rg");
-        unsafe {
-            std::env::remove_var(ENV_SERVING_LOG);
-        }
+        TEST_SERVING_LOG.with(|slot| *slot.borrow_mut() = None);
         let content = std::fs::read_to_string(&log).expect("log written");
         let row: serde_json::Value = serde_json::from_str(content.trim()).expect("json row");
         assert_eq!(row["tool"], "rg");
