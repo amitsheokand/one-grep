@@ -341,6 +341,21 @@ full rankings, and the v2 gate still holds. The motivating
 pretty-prompt case did not move (vec-29 stays buried) — that one needs
 the semantic judge, not more spread.
 
+## Run 12 negative — term-overlap routing (2026-09-24)
+
+Hypothesis: route NL queries by distinctive-term coverage (fraction of
+non-stopword terms present anywhere in the index) — high overlap →
+lexical, low overlap → hybrid. Dry-run on all 14 bench queries:
+misses measure 1.00 coverage (mlx server, rust setup, ssh hosts, never
+both, no secrets), hits range 0.80–1.00. No separation — presence is
+near-universal because BM25 always finds *something*; the question is
+whether the *right file* ranks, which presence cannot see. Rejected
+without code churn (one `/tmp` script, since removed). Score margins
+and lex/vec top-1 agreement were eyed next but also fail clean
+separation on n=14; per Run 5 discipline, no threshold gets picked
+from this sample. NL stays hybrid-routed; the outstanding lever
+remains the judge (Laya bake-off).
+
 ## Run 12 fix verified — symbol size cap (2026-09-24)
 
 Implemented: `Symbol` chunks spanning >80 lines split into overlapping

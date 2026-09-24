@@ -23,6 +23,8 @@ actually care about.
 | 1.3 | `og-intent-ranker` — ranker trained or prompted on intent, not keyword overlap; candidates: LocalJev via `TYPESAFE_BASE_URL`, fine-tuned MiniLM (`ft2`), fusion-constant retune. Jina stays available, never default | **Done (first cut)** — hybrid MiniLM measured on the frozen set (Run 11): paraphrase 2/3 → 3/3, no regressions; LocalJev wire path proven by mock round-trip test; real-corpus concepts still open (Run 9: 1/4) | concept R@3 beats lexical on the frozen set; keyword R@3 does not regress |
 | 1.7 | `og-rrf-spread` + `og-chain-dedupe` (Run 12) — duplicate chain chunks stacked RRF terms (found via impossible score); dedupe at extraction, extractor v3; RRF k 60→20 after clean A/B (keyword 8/10→9/10, no regress) | **Done** — 114 green incl. `repeated_call_sites_emit_one_chain`; score test now computed from the constant | RRF table above; v2 floors hold |
 
+| 1.7 | `og-overlap-router` (Run 12) — route NL by index term coverage | **Rejected** — dry-run showed 1.00 coverage on misses; no separation, no code written | dry-run table in results.md |
+
 | 1.6 | `og-symbol-cap` (Run 12 follow-up) — split >80-line symbols with breadcrumb inheritance; extractor version 2 | **Done** — initContent split verified live, distinctive sub-query surfaces at #8, never-both holds, v2 floors green | oversized-split + small-stays-whole unit tests |
 
 | 1.5 | `og-header-chunks` (Run 12 follow-up) — file-header `#`/`//` comment blocks as `(header)` chunks; extractor version marker forces re-extract on chunking upgrades | **Done** — never-both went absent→lexical #4/hybrid #6 live; +5.5% chunks; incremental embed unaffected | header chunk unit tests + live bench check |
