@@ -206,6 +206,10 @@ Honest substitutes, depending on which half of one-grep you need:
   — the ast-grep team's own MCP server. Use it side-by-side when agents
   need deep structural rules; use one-grep's `search` for intent and
   `rg --structural` for one-off shape queries.
+* **Judges**: [Laya](https://github.com/NandhaKishorM/laya) (local, calibrated
+  Nouls; trialed as our ranker via `TYPESAFE_BASE_URL`, Run 14) and
+  [CLM](https://github.com/Contrastive-LM/CLM) (faster on NVIDIA, relative
+  scores; tracked for its hard-negative training recipe, Run 15).
 * **Combined engines**: [`ox-core`](https://crates.io/crates/ox-core)
   (`ox-codes`) — ripgrep + tree-sitter + ast-grep as an HTTP service
   with rewrite and dataflow analysis. Heavier than one-grep; pick it

@@ -337,6 +337,30 @@ stronger ranker — Laya comparison stays open. R9700 Vulkan serving is
 proven for this path; CPU needs ~10 tok/s (≈8 min per 20-doc call),
 hence the 90 s client budget is Vulkan-first.
 
+## Run 15 — CLM-8B vs Laya for our judge slot (2026-09-24, research)
+
+Contrastive-LM released CLM-8B (bi-encoder: frozen Qwen3-8B + 20M heads,
+InfoNCE, dot-product + softmax; TypeSafe-compatible API; Apache-2.0;
+716 stars day one). Vendor numbers: up to 9x Jev latency (T-Rex,
+repeated actions + caching), fine-tuned verifier heads 81.6% DeepSWE /
+87.6% Terminal-Bench (held-out subsets).
+
+Fair fight on our use (rerank code shortlists, R9700, no NVIDIA):
+
+- Probability shape decides it: Laya emits absolute P(true) which our
+  gates consume (exists bands, missing-to-0.0 fail-closed); CLM emits
+  softmax-relative-to-set (their own card warns), which cannot drive a
+  fail-closed gate.
+- Zero-shot: CLM trails Jev on tool-calling (95.2 vs 99.2) and
+  WikiRacing (26/30); Laya measured identical-to-hybrid on our 14.
+- Hardware: Laya runs CPU here today; CLM serves via vLLM on NVIDIA —
+  no path on R9700 short of ROCm hacks.
+- Transferable (not the checkpoint): hard negatives beat volume (matches
+  our Run 10), and zero-shot is not verifier-grade (matches our Run 14).
+
+Verdict: Laya stays the trial horse; CLM is tracked for its training
+recipe if we ever train ft-judge, and revisited only with NVIDIA.
+
 ## Run 14 — Laya as the Noul judge via the SystemOne seam (2026-09-24)
 
 Laya 0.3.11 (`pip install "laya[serve]"`, torch CPU — needed
