@@ -309,6 +309,8 @@ pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Ve
 
 /// Search `workspace` for `pattern`, returning up to `options.limit` hits.
 ///
+/// `workspace` is a directory walked in parallel, or a single file (like
+/// ripgrep: harnesses sometimes map a file `path` onto the workspace slot).
 /// The walk runs on all cores (`ignore` parallel walker); hits are sorted
 /// by `(path, line)` and truncated, so output is deterministic across runs.
 /// `limit` caps output lines, not files scanned. Surrounding shell-style
@@ -319,11 +321,11 @@ pub fn fallback_search(workspace: &Path, query: &str, limit: usize) -> Result<Ve
 /// # Errors
 ///
 /// Returns [`Error`] when the pattern fails to compile, a `--lang` is
-/// unknown, the workspace cannot be walked, or a file cannot be searched.
+/// unknown, the workspace is missing, or a file cannot be searched.
 pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<Hit>, Error> {
-    if !workspace.is_dir() {
+    if !workspace.exists() {
         return Err(Error::InvalidInput(format!(
-            "workspace is not a directory: {}",
+            "workspace does not exist: {}",
             workspace.display()
         )));
     }
@@ -336,6 +338,10 @@ pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<
         .case_insensitive(options.case_insensitive)
         .fixed_strings(!options.regex)
         .build(effective)?;
+
+    if workspace.is_file() {
+        return search_one_file(workspace, &matcher, options.limit);
+    }
 
     let mut builder = WalkBuilder::new(workspace);
     builder
@@ -395,6 +401,26 @@ pub fn search(workspace: &Path, pattern: &str, options: &Options) -> Result<Vec<
     hits.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)));
     hits.truncate(limit);
     Ok(hits)
+}
+
+/// Search a single file (no walk). Skip unreadable files quietly, like the
+/// walker path does.
+fn search_one_file(
+    path: &Path,
+    matcher: &grep::regex::RegexMatcher,
+    limit: usize,
+) -> Result<Vec<Hit>, Error> {
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        .build();
+    let mut sink = VecSink {
+        path: path.to_path_buf(),
+        out: Vec::new(),
+    };
+    let _ = searcher.search_path(matcher, path, &mut sink);
+    sink.out.truncate(limit);
+    Ok(sink.out)
 }
 
 /// Per-file sink used by the parallel walker (merged under a mutex after).
@@ -479,6 +505,14 @@ mod tests {
         let hits = search(dir.path(), "hunter2", &Options::default()).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, dir.path().join("notes.txt"));
+    }
+
+    #[test]
+    fn single_file_root_searches_that_file() {
+        let dir = workspace_with(&[("a.txt", "needle here\n"), ("b.txt", "needle here\n")]);
+        let hits = search(&dir.path().join("a.txt"), "needle", &Options::default()).expect("search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].path, dir.path().join("a.txt"));
     }
 
     #[test]

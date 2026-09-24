@@ -1021,7 +1021,22 @@ impl OneGrep {
         )
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
-        let root = check_root(&p.root)?;
+        // `rg` accepts a file or a directory as root (ripgrep semantics):
+        // harnesses sometimes map a file `path` onto the workspace slot.
+        // Every other tool still requires a directory via `check_root`.
+        let root = PathBuf::from(&p.root);
+        if !root.is_absolute() {
+            return Err(McpError::invalid_params(
+                format!("root must be absolute: {}", p.root),
+                None,
+            ));
+        }
+        if !root.exists() {
+            return Err(McpError::invalid_params(
+                format!("root does not exist: {}", p.root),
+                None,
+            ));
+        }
         let started = std::time::Instant::now();
         let format = Format::opt(p.format);
         if p.structural.unwrap_or(false) {
