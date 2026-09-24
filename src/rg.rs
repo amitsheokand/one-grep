@@ -510,7 +510,8 @@ mod tests {
     #[test]
     fn single_file_root_searches_that_file() {
         let dir = workspace_with(&[("a.txt", "needle here\n"), ("b.txt", "needle here\n")]);
-        let hits = search(&dir.path().join("a.txt"), "needle", &Options::default()).expect("search");
+        let hits =
+            search(&dir.path().join("a.txt"), "needle", &Options::default()).expect("search");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, dir.path().join("a.txt"));
     }
