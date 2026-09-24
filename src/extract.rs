@@ -6,6 +6,8 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::Error;
 
 /// Extractor version. Bump when chunking rules change; the index sync
@@ -14,7 +16,8 @@ use crate::Error;
 pub const EXTRACT_VERSION: &str = "3";
 
 /// How a chunk was derived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ChunkKind {
     /// A language symbol (function, struct, class, ...).
     Symbol,
@@ -25,7 +28,7 @@ pub enum ChunkKind {
 }
 
 /// One retrievable unit of a file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Chunk {
     /// File the chunk came from, as passed in.
     pub path: PathBuf,
@@ -78,6 +81,26 @@ pub fn extract_file_with(path: &Path, window: Window) -> Result<Vec<Chunk>, Erro
 #[must_use]
 pub fn extract(path: &Path, text: &str) -> Vec<Chunk> {
     extract_with(path, text, DEFAULT_WINDOW)
+}
+
+/// Smallest chunk containing 1-based `line`, or `None` when no chunk
+/// covers it (binary, generated, or out of range). Nesting and overlap
+/// resolve to the tightest span, so a line inside a method returns the
+/// method, not the file. Backs the `context` tool: expand a citation to
+/// its enclosing symbol instead of reading the whole file.
+///
+/// # Errors
+///
+/// Returns [`Error`] when the file cannot be read.
+pub fn enclosing(path: &Path, line: u64) -> Result<Option<Chunk>, Error> {
+    if line < 1 {
+        return Ok(None);
+    }
+    let chunks = extract_file(path)?;
+    Ok(chunks
+        .into_iter()
+        .filter(|c| c.start <= line && line <= c.end)
+        .min_by_key(|c| (c.end - c.start, c.start)))
 }
 
 /// Window `(size, step)` for fallback chunking.
@@ -647,6 +670,28 @@ mod tests {
         assert_eq!(parts[1].end, 102);
         assert!(parts[0].text.contains("let x0"));
         assert!(parts[1].text.contains("let x99"));
+    }
+
+    #[test]
+    fn enclosing_prefers_tightest_span() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.rs");
+        std::fs::write(
+            &path,
+            "mod outer {\n    pub struct Inner;\n\n    impl Inner {\n        pub fn deep(&self) {}\n    }\n}\n",
+        )
+        .expect("write");
+        // Line 5 is inside `deep`, `impl Inner`, and `mod outer`.
+        let hit = super::enclosing(&path, 5).expect("enclosing").expect("hit");
+        assert_eq!(hit.breadcrumb, "outer > impl Inner > deep");
+        assert_eq!((hit.start, hit.end), (5, 5));
+        // Line 1 is only inside the module.
+        let outer = super::enclosing(&path, 1).expect("enclosing").expect("hit");
+        assert_eq!(outer.breadcrumb, "outer");
+        // Past EOF: nothing.
+        assert!(super::enclosing(&path, 99).expect("enclosing").is_none());
+        // Line 0: invalid, not a panic.
+        assert!(super::enclosing(&path, 0).expect("enclosing").is_none());
     }
 
     #[test]

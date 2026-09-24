@@ -27,9 +27,9 @@ Crate/binary name: **`one-grep`**. License: Apache-2.0. MSRV: Rust 1.85.
   in-process via fastembed, fused with BM25 by RRF (fetch depth 50/side,
   lexical 2x weight). Optional local cross-encoder rescore
   (`--rerank` / `--rank jina`, Jina v1-turbo top-20).
-* **MCP server** (`serve`): 5 tools over stdio or `127.0.0.1:3210/mcp`
+* **MCP server** (`serve`): 6 tools over stdio or `127.0.0.1:3210/mcp`
   (bearer token in `~/.one-grep/token`, mode 0600):
-  `search`, `search_ranked`, `definition`, `rg`, `skill`.
+  `search`, `search_ranked`, `definition`, `rg`, `skill`, `context`.
 * **Agent wiring** (`install`, Nix module): idempotent upsert of the
   `one-grep` entry into 6 harnesses, preserving peer servers.
 * **Maintenance**: `watch` (2s-debounce re-sync), `embed` (model sync),
@@ -87,6 +87,7 @@ cargo build --release
 ./target/release/one-grep rg "pattern" <path> [--regex] [--case-insensitive] [--lang rust|python|typescript|go|java|nix|markdown] [--glob '*.rs'] [--limit 100] [--json]
 ./target/release/one-grep watch <path>
 ./target/release/one-grep dump-chunks <path>
+./target/release/one-grep context <file> <line> [--json]
 ./target/release/one-grep skill "task description" [--dir ~/.local/share/agent-skills] [--limit 2] [--json]
 ./target/release/one-grep serve --stdio        # or HTTP on 127.0.0.1:3210
 ./target/release/one-grep install --target opencode|cursor|pi|muse|hermes|command-code [--http --port 3210]
@@ -141,6 +142,7 @@ the query instead of widening the read.
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
 | `rg` | `root*`, `pattern*`, `regex?=false`, `structural?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `format?=text`, `limit?=100` (1–500) | `path:line:text` lines (or `{"notes","hits"}` with `format=json`), gitignore-aware |
+| `context` | `root*`, `path*`, `line*`, `format?=text` | enclosing symbol chunk (`path:start-end [breadcrumb] (kind)`) — expands a citation instead of a whole-file read |
 | `skill` | `task*`, `limit?=2` (1–5), `dir?`, `format?=text` | `name  /absolute/path/.../SKILL.md  (score)` plus one-line description; Jev ranks when a key is set, else lexical fallback (requires token overlap); never the SKILL.md body |
 
 ## Skill library

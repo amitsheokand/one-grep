@@ -241,6 +241,18 @@ struct DefinitionParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct ContextParams {
+    /// Absolute workspace root.
+    root: String,
+    /// File containing the line, relative to root or absolute.
+    path: String,
+    /// 1-based line number inside the symbol to expand.
+    line: u64,
+    /// Output format: `text` (default) or `json` (`{"notes","hits"}`).
+    format: Option<Format>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 struct RgParams {
     /// Absolute workspace root.
     root: String,
@@ -744,6 +756,72 @@ impl OneGrep {
     }
 
     #[tool(
+        description = "Expand a citation to its enclosing symbol: smallest chunk containing path:line (function, struct, section, or window). Replaces a whole-file read after a search hit. No enclosing symbol (binary, generated, out of range) is an explanatory note, not an error."
+    )]
+    async fn context(
+        &self,
+        Parameters(p): Parameters<ContextParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = check_root(&p.root)?;
+        let started = std::time::Instant::now();
+        let file = resolve_in_root(&root, &p.path).ok_or_else(|| {
+            McpError::invalid_params(format!("path escapes workspace root: {}", p.path), None)
+        })?;
+        if p.line < 1 {
+            return Err(McpError::invalid_params("line is 1-based", None));
+        }
+        let format = Format::opt(p.format);
+        let chunk = crate::extract::enclosing(&file, p.line).map_err(internal)?;
+        let Some(chunk) = chunk else {
+            let note = format!(
+                "no enclosing symbol at {}:{}; read the cited range",
+                file.display(),
+                p.line
+            );
+            if let Some(envelope) = format.envelope(&[note.clone()], &Vec::<String>::new()) {
+                return Ok(text_block(envelope));
+            }
+            return Ok(text_block(note));
+        };
+        if let Some(envelope) = format.envelope(&[], &vec![chunk.clone()]) {
+            log_call(
+                "context",
+                &p.root,
+                &p.path,
+                1,
+                envelope.len(),
+                &[],
+                started.elapsed().as_secs_f64(),
+            );
+            return Ok(text_block(envelope));
+        }
+        let kind = match chunk.kind {
+            crate::extract::ChunkKind::Symbol => "symbol",
+            crate::extract::ChunkKind::Section => "section",
+            crate::extract::ChunkKind::Window => "window",
+        };
+        let text = format!(
+            "{}:{}-{} [{}] ({})\n{}",
+            chunk.path.display(),
+            chunk.start,
+            chunk.end,
+            chunk.breadcrumb,
+            kind,
+            chunk.text
+        );
+        log_call(
+            "context",
+            &p.root,
+            &p.path,
+            1,
+            text.len(),
+            &[],
+            started.elapsed().as_secs_f64(),
+        );
+        Ok(text_block(text))
+    }
+
+    #[tool(
         description = "Exact text or regex search over workspace files (no index needed). Gitignore-aware. Returns path:line:text hits. Pass raw pattern text without shell quotes; a single outer \"...\" or '...' pair is stripped. Literal unless `regex` is true. `lang` restricts to languages (rust, python, typescript, go, java, nix, markdown); `globs` are include globs (`!` negates). `structural` runs the pattern through ast-grep instead (needs exactly one `lang`)."
     )]
     async fn rg(&self, Parameters(p): Parameters<RgParams>) -> Result<CallToolResult, McpError> {
@@ -970,7 +1048,7 @@ impl rmcp::ServerHandler for OneGrep {
              or regex. Use `definition` to jump from a Rust reference to its \
              definition. Need a specialized skill (API docs, domain workflow)? Call \
              `skill` with the task first. Cite path:start-end evidence; to read more, \
-             read only the cited line range, never the whole file."
+             read only the cited line range \u2014 or call `context` with the cited line for its enclosing symbol \u2014 never the whole file."
                 .into(),
         );
         info
@@ -1739,6 +1817,58 @@ mod tests {
             stream.write_all(response.as_bytes()).expect("write");
         });
         format!("http://{addr}")
+    }
+
+    /// `context` expands a citation line to its enclosing symbol.
+    #[tokio::test]
+    async fn context_returns_enclosing_symbol() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(
+            workspace.path().join("a.rs"),
+            "mod outer {\n    pub fn deep(&self) {}\n}\n",
+        )
+        .expect("fixture");
+        let result = OneGrep::new()
+            .context(Parameters(ContextParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                path: "a.rs".into(),
+                line: 2,
+                format: None,
+            }))
+            .await
+            .expect("context");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert!(body.contains("outer > deep"), "{body}");
+        assert!(body.contains("(symbol)"), "{body}");
+        // Out of range: explanatory note, still success.
+        let result = OneGrep::new()
+            .context(Parameters(ContextParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                path: "a.rs".into(),
+                line: 99,
+                format: None,
+            }))
+            .await
+            .expect("context");
+        let text = serde_json::to_value(result).expect("response");
+        assert!(
+            text["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("no enclosing symbol"),
+        );
+        // Escape: invalid params.
+        let err = OneGrep::new()
+            .context(Parameters(ContextParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                path: "../escape.rs".into(),
+                line: 1,
+                format: None,
+            }))
+            .await
+            .expect_err("escape must fail");
+        assert!(err.message.contains("escapes"), "{err:?}");
     }
 
     /// Serving log: one JSONL row per call, opt-out path via env.

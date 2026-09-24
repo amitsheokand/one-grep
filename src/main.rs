@@ -99,6 +99,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Expand a citation to its enclosing symbol (no whole-file read).
+    Context {
+        /// File containing the line.
+        path: std::path::PathBuf,
+        /// 1-based line number inside the symbol to expand.
+        line: u64,
+        /// Emit JSON instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
     /// Serve the MCP server.
     Serve {
         /// Use stdio transport instead of HTTP.
@@ -614,6 +624,33 @@ async fn main() -> Result<()> {
                 return Ok(());
             }
             println!("{}", result.format_text());
+        }
+        Command::Context { path, line, json } => {
+            let Some(chunk) = one_grep::extract::enclosing(&path, line)? else {
+                eprintln!(
+                    "no enclosing symbol at {}:{line}; read the cited range",
+                    path.display()
+                );
+                return Ok(());
+            };
+            if json {
+                print_json(&chunk)?;
+                return Ok(());
+            }
+            let kind = match chunk.kind {
+                one_grep::extract::ChunkKind::Symbol => "symbol",
+                one_grep::extract::ChunkKind::Section => "section",
+                one_grep::extract::ChunkKind::Window => "window",
+            };
+            println!(
+                "{}:{}-{} [{}] ({})\n{}",
+                chunk.path.display(),
+                chunk.start,
+                chunk.end,
+                chunk.breadcrumb,
+                kind,
+                chunk.text
+            );
         }
         Command::Serve { stdio, port } => {
             if stdio {

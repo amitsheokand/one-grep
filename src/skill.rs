@@ -187,7 +187,7 @@ struct BlockStyle {
 
 fn read_skill_md_capped(path: &Path) -> Result<String, String> {
     use std::io::Read;
-    let mut file = std::fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
+    let file = std::fs::File::open(path).map_err(|e| format!("could not open: {e}"))?;
     let mut buf = Vec::new();
     file.take(SKILL_MD_READ_CAP as u64)
         .read_to_end(&mut buf)

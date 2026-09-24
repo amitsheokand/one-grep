@@ -54,7 +54,7 @@ Writes/upserts the `one-grep` entry shapes documented in §4 (stdio → `~/.loca
 
 ## 3. MCP Surface (`src/mcp.rs`)
 
-The MCP server exposes search, definition, `rg`, and `skill` tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
+The MCP server exposes search, definition, `rg`, `skill`, and `context` tools over both `stdio` and loopback HTTP (`127.0.0.1:3210/mcp` with Bearer authentication):
 
 ### Server Instructions
 > "Local-first hybrid workspace search. Prefer `search_ranked` for intent (retrieve + Jev inside the tool; only top-k winners enter context). Use `search` for the raw fused pool. Use `rg` for exact text, symbols, or regex. Use `definition` to jump from a Rust reference to its definition. Need a specialized skill (API docs, domain workflow)? Call `skill` with the task first. Cite path:start-end evidence; to read more, read only the cited line range, never the whole file."
