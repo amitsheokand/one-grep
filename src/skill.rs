@@ -20,14 +20,15 @@ const DEFAULT_SKILLS_REL: &str = ".local/share/agent-skills";
 const DESC_CAP: usize = 200;
 const EXISTS_FLOOR: f64 = 0.5;
 const SCORE_FLOOR: f32 = 0.5;
+const LEXICAL_SCORE_FLOOR: f32 = 0.2;
 
 /// One skill entry from front matter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillEntry {
     pub name: String,
     pub description: String,
-    /// Path relative to the library root (e.g. `winrt/SKILL.md`).
-    pub rel_path: String,
+    /// Absolute path to `SKILL.md` (canonical when the OS allows).
+    pub skill_path: PathBuf,
 }
 
 /// A ranked skill returned to callers.
@@ -136,22 +137,23 @@ pub fn scan_library(dir: &Path) -> Result<(Vec<SkillEntry>, Vec<String>), Error>
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let rel_path = format!("{}/SKILL.md", folder_name);
-        let text = std::fs::read_to_string(&skill_md)
-            .map_err(|e| Error::InvalidInput(format!("{}: {e}", skill_md.display())))?;
+        let rel_label = format!("{folder_name}/SKILL.md");
+        let skill_path = std::fs::canonicalize(&skill_md).unwrap_or(skill_md);
+        let text = std::fs::read_to_string(&skill_path)
+            .map_err(|e| Error::InvalidInput(format!("{}: {e}", skill_path.display())))?;
         match parse_skill_md(&text, &folder_name) {
             Ok(Some(entry)) => {
                 skills.push(SkillEntry {
                     name: entry.name,
                     description: entry.description,
-                    rel_path,
+                    skill_path,
                 });
             }
             Ok(None) => {
-                notes.push(format!("skipped {}: missing description", rel_path));
+                notes.push(format!("skipped {rel_label}: missing description"));
             }
             Err(e) => {
-                notes.push(format!("skipped {}: {e}", rel_path));
+                notes.push(format!("skipped {rel_label}: {e}"));
             }
         }
     }
@@ -283,6 +285,7 @@ fn cap_description(text: &str) -> String {
 pub fn run(task: &str, dir: Option<&Path>, limit: usize) -> SkillResult {
     let limit = limit.clamp(1, 5);
     let library = resolve_library_dir(dir);
+    let library = std::fs::canonicalize(&library).unwrap_or(library);
     let (entries, scan_notes) = match scan_library(&library) {
         Ok(pair) => pair,
         Err(e) => {
@@ -356,18 +359,17 @@ fn lexical_rank(
     status: RankStatus,
 ) -> (RankStatus, Vec<SkillHit>) {
     let task_tokens = tokens(task);
-    let mut scored: Vec<(usize, f32)> = entries
+    if task_tokens.is_empty() {
+        return (status, Vec::new());
+    }
+    let mut scored: Vec<(usize, f32, usize)> = entries
         .iter()
         .enumerate()
         .map(|(i, e)| {
             let doc_tokens = tokens(&format!("{} {}", e.name, e.description));
             let overlap = task_tokens.intersection(&doc_tokens).count();
-            let score = if task_tokens.is_empty() {
-                0.0
-            } else {
-                overlap as f32 / task_tokens.len() as f32
-            };
-            (i, score)
+            let score = overlap as f32 / task_tokens.len() as f32;
+            (i, score, overlap)
         })
         .collect();
     scored.sort_by(|a, b| {
@@ -376,8 +378,9 @@ fn lexical_rank(
     });
     let hits = scored
         .into_iter()
+        .filter(|(_, score, overlap)| *overlap >= 1 && *score >= LEXICAL_SCORE_FLOOR)
         .take(limit)
-        .map(|(idx, score)| entry_to_hit(&entries[idx], score))
+        .map(|(idx, score, _)| entry_to_hit(&entries[idx], score))
         .collect();
     (status, hits)
 }
@@ -385,7 +388,7 @@ fn lexical_rank(
 fn entry_to_hit(entry: &SkillEntry, score: f32) -> SkillHit {
     SkillHit {
         name: entry.name.clone(),
-        path: entry.rel_path.clone(),
+        path: entry.skill_path.display().to_string(),
         score,
         description: cap_description(&entry.description),
     }
@@ -495,6 +498,40 @@ mod tests {
         assert!(!r1.no_match);
         assert_eq!(r1.hits[0].name, "winrt-lookup");
         assert_eq!(r1.hits, r2.hits);
+        let path = Path::new(&r1.hits[0].path);
+        assert!(path.is_absolute(), "{}", r1.hits[0].path);
+        assert!(
+            r1.hits[0].path.ends_with("quoted-skill/SKILL.md"),
+            "{}",
+            r1.hits[0].path
+        );
+    }
+
+    #[test]
+    fn fallback_no_overlap_returns_no_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_fixture(dir.path()).expect("fixture");
+        let home = tempfile::tempdir().expect("home");
+        let prev_home = std::env::var_os("HOME");
+        let prev_key = std::env::var(ENV_API_KEY).ok();
+        unsafe {
+            std::env::set_var("HOME", home.path());
+            std::env::remove_var(ENV_API_KEY);
+        }
+        let r = run("quantum gardening underwater zzz", Some(dir.path()), 3);
+        unsafe {
+            match prev_key {
+                Some(v) => std::env::set_var(ENV_API_KEY, v),
+                None => std::env::remove_var(ENV_API_KEY),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+        assert!(r.no_match);
+        assert!(r.hits.is_empty());
+        assert!(r.format_text().contains("no matching skill"));
     }
 
     #[test]

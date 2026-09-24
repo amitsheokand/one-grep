@@ -836,7 +836,7 @@ impl OneGrep {
     }
 
     #[tool(
-        description = "Route a task to the best matching agent skill from the on-disk skill library. Jev ranks inside the tool when a TypeSafe key is configured; otherwise lexical fallback. Returns skill name, path to SKILL.md, score, and a one-line description — never the skill body."
+        description = "Route a task to the best matching agent skill from the on-disk skill library. Jev ranks inside the tool when a TypeSafe key is configured; otherwise lexical fallback with overlap floor. Returns skill name, absolute path to SKILL.md, score, and a one-line description — never the skill body."
     )]
     async fn skill(
         &self,
@@ -1075,6 +1075,16 @@ mod tests {
         let body = text["content"][0]["text"].as_str().unwrap();
         assert!(body.contains("winrt-lookup"), "{body}");
         assert!(!body.contains("SECRET_BODY_MARKER"), "{body}");
+        assert!(
+            body.contains("/quoted-skill/SKILL.md"),
+            "expected absolute path in output: {body}"
+        );
+        let path_line = body
+            .lines()
+            .find(|l| l.contains("winrt-lookup"))
+            .expect("hit line");
+        let path_token = path_line.split_whitespace().nth(1).expect("path");
+        assert!(Path::new(path_token).is_absolute(), "{path_token}");
     }
 
     #[test]
