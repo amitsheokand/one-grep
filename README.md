@@ -141,7 +141,7 @@ the query instead of widening the read.
 | `search_ranked` | same as `search` | same pool rescored by Jev, top-k only, `rank: jev exists=…` or `rank: fallback (reason)` header |
 | `definition` | `root*`, `path*`, `line*` (1-based), `character*` (1-based), `server?` (default `rust-analyzer`) | `path:start-end (workspace\|external)`; escapes rejected, missing server is an error |
 | `rg` | `root*`, `pattern*`, `regex?=false`, `structural?=false`, `case_insensitive?=false`, `lang?`, `globs?`, `format?=text`, `limit?=100` (1–500) | `path:line:text` lines (or `{"notes","hits"}` with `format=json`), gitignore-aware |
-| `skill` | `task*`, `limit?=2` (1–5), `dir?`, `format?=text` | `name  path/SKILL.md  (score)` plus one-line description; Jev ranks when a key is set, else lexical fallback; never the SKILL.md body |
+| `skill` | `task*`, `limit?=2` (1–5), `dir?`, `format?=text` | `name  /absolute/path/.../SKILL.md  (score)` plus one-line description; Jev ranks when a key is set, else lexical fallback (requires token overlap); never the SKILL.md body |
 
 ## Skill library
 
@@ -149,7 +149,7 @@ Rarely used skills can live under `~/.local/share/agent-skills` (override with
 `ONE_GREP_SKILLS_DIR` or the MCP/CLI `dir` param): one folder per skill with a
 `SKILL.md` front matter (`name`, `description`). Harnesses that only load
 `~/.cursor/skills` (or similar) no longer pay for every skill on every turn —
-call `skill` with the task first, then read the winning `SKILL.md` yourself.
+call `skill` with the task first, then read the winning absolute `SKILL.md` path yourself.
 
 ## Install targets
 

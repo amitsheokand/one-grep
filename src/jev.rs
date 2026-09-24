@@ -261,11 +261,55 @@ fn truncate_err(text: &str) -> String {
 
 impl Rerank for JevReranker {
     fn rerank(&self, query: &str, docs: &[&str]) -> Result<Vec<(usize, f32)>, Error> {
-        rerank_nouls(query, docs, |state, questions| {
+        rerank_nouls(query, docs, NoulWording::SEARCH, |state, questions| {
             let answers = self.evaluate(state, questions)?;
             Ok(answers.get("answers").cloned().unwrap_or(Value::Null))
         })
     }
+}
+
+/// Noul question text for a closed-list rerank pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NoulWording {
+    pub state_key: &'static str,
+    pub exists_instructions: &'static str,
+    pub exists_true: &'static str,
+    pub exists_false: &'static str,
+    pub candidate_true: &'static str,
+    pub candidate_false: &'static str,
+    pub candidate_instructions: fn(usize) -> String,
+}
+
+impl NoulWording {
+    /// Code-search shortlist (`search_ranked` / [`rerank_hits`]).
+    pub const SEARCH: Self = Self {
+        state_key: "query",
+        exists_instructions: "Does any candidate supply evidence that answers the query?",
+        exists_true: "At least one candidate states or implements what the query asks for.",
+        exists_false: "No candidate addresses the query.",
+        candidate_true: "This candidate states or implements what the query asks for.",
+        candidate_false: "This candidate is only loosely related, or is an example rather than the answer.",
+        candidate_instructions: search_candidate_instructions,
+    };
+
+    /// Agent skill library routing ([`crate::skill`]).
+    pub const SKILL: Self = Self {
+        state_key: "task",
+        exists_instructions: "Would at least one candidate skill help an agent carry out this task?",
+        exists_true: "A candidate skill covers the domain, API family, tool or workflow the task needs.",
+        exists_false: "No candidate skill is relevant to the task's domain or workflow.",
+        candidate_true: "The skill's description covers the domain, API family, tool or workflow this task needs.",
+        candidate_false: "The skill is about a different domain, tool or workflow than the task.",
+        candidate_instructions: skill_candidate_instructions,
+    };
+}
+
+fn search_candidate_instructions(i: usize) -> String {
+    format!("Does candidate c{i} answer the query directly?")
+}
+
+fn skill_candidate_instructions(i: usize) -> String {
+    format!("Would loading skill c{i} help an agent carry out this task?")
 }
 
 /// Score each doc with a Noul; sort highest first. `exists` is recorded
@@ -277,8 +321,9 @@ impl Rerank for JevReranker {
 /// per-candidate instruction judges that candidate alone, never by rank
 /// against the others. A missing Noul fails closed to 0.0.
 pub(crate) fn rerank_nouls(
-    query: &str,
+    text: &str,
     docs: &[&str],
+    wording: NoulWording,
     mut evaluate: impl FnMut(Value, Value) -> Result<Value, Error>,
 ) -> Result<Vec<(usize, f32)>, Error> {
     if docs.is_empty() {
@@ -290,10 +335,10 @@ pub(crate) fn rerank_nouls(
         "exists".into(),
         json!({
             "type": "noul",
-            "instructions": "Does any candidate supply evidence that answers the query?",
+            "instructions": wording.exists_instructions,
             "criteria": {
-                "true": "At least one candidate states or implements what the query asks for.",
-                "false": "No candidate addresses the query."
+                "true": wording.exists_true,
+                "false": wording.exists_false,
             }
         }),
     );
@@ -307,16 +352,18 @@ pub(crate) fn rerank_nouls(
             format!("c{i}"),
             json!({
                 "type": "noul",
-                "instructions": format!("Does candidate c{i} answer the query directly?"),
+                "instructions": (wording.candidate_instructions)(i),
                 "criteria": {
-                    "true": "This candidate states or implements what the query asks for.",
-                    "false": "This candidate is only loosely related, or is an example rather than the answer."
+                    "true": wording.candidate_true,
+                    "false": wording.candidate_false,
                 }
             }),
         );
     }
-    let state = json!({ "query": query, "candidates": candidates });
-    let answers = evaluate(state, Value::Object(questions))?;
+    let mut state = serde_json::Map::new();
+    state.insert(wording.state_key.into(), Value::String(text.to_owned()));
+    state.insert("candidates".into(), Value::Array(candidates));
+    let answers = evaluate(Value::Object(state), Value::Object(questions))?;
     let mut scored: Vec<(usize, f32)> = Vec::with_capacity(docs.len());
     for i in 0..docs.len() {
         let noul = answers
@@ -366,7 +413,7 @@ pub fn rerank_hits(query: &str, hits: Vec<FusedHit>) -> (RankStatus, Vec<FusedHi
         .collect();
     let refs: Vec<&str> = docs.iter().map(String::as_str).collect();
     let mut exists = None;
-    let order = match rerank_nouls(query, &refs, |state, questions| {
+    let order = match rerank_nouls(query, &refs, NoulWording::SEARCH, |state, questions| {
         let body = reranker.evaluate(state, questions)?;
         let answers = body.get("answers").cloned().unwrap_or(Value::Null);
         exists = noul_exists(&answers);
@@ -432,7 +479,7 @@ mod tests {
     #[test]
     fn rerank_nouls_orders_by_score() {
         let docs = ["alpha", "bravo", "charlie"];
-        let order = rerank_nouls("q", &docs, |_state, _q| {
+        let order = rerank_nouls("q", &docs, NoulWording::SEARCH, |_state, _q| {
             Ok(json!({
                 "exists": {"type": "noul", "noul": 0.9},
                 "c0": {"type": "noul", "noul": 0.1},
@@ -442,6 +489,58 @@ mod tests {
         })
         .expect("rank");
         assert_eq!(order, vec![(1, 0.8), (2, 0.4), (0, 0.1)]);
+    }
+
+    #[test]
+    fn search_noul_wording_sent_to_evaluate_is_unchanged() {
+        let docs = ["alpha"];
+        rerank_nouls("needle", &docs, NoulWording::SEARCH, |state, questions| {
+            assert_eq!(
+                state.get("query").and_then(Value::as_str),
+                Some("needle")
+            );
+            assert!(state.get("task").is_none());
+            let exists = questions.get("exists").expect("exists");
+            assert_eq!(
+                exists,
+                &json!({
+                    "type": "noul",
+                    "instructions": "Does any candidate supply evidence that answers the query?",
+                    "criteria": {
+                        "true": "At least one candidate states or implements what the query asks for.",
+                        "false": "No candidate addresses the query."
+                    }
+                })
+            );
+            let c0 = questions.get("c0").expect("c0");
+            assert_eq!(
+                c0,
+                &json!({
+                    "type": "noul",
+                    "instructions": "Does candidate c0 answer the query directly?",
+                    "criteria": {
+                        "true": "This candidate states or implements what the query asks for.",
+                        "false": "This candidate is only loosely related, or is an example rather than the answer."
+                    }
+                })
+            );
+            Ok(json!({"exists": {"noul": 0.5}, "c0": {"noul": 0.5}}))
+        })
+        .expect("rank");
+    }
+
+    #[test]
+    fn skill_noul_wording_uses_task_and_carry_out_phrasing() {
+        let docs = ["skill one"];
+        rerank_nouls("do work", &docs, NoulWording::SKILL, |state, questions| {
+            assert_eq!(state.get("task").and_then(Value::as_str), Some("do work"));
+            assert!(state.get("query").is_none());
+            let q = serde_json::to_string(&questions).expect("json");
+            assert!(q.contains("carry out this task"));
+            assert!(q.contains("Would loading skill c0 help an agent carry out this task?"));
+            Ok(json!({"exists": {"noul": 0.5}, "c0": {"noul": 0.5}}))
+        })
+        .expect("rank");
     }
 
     #[test]
