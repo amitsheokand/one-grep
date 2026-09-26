@@ -53,6 +53,15 @@ fn text_block(text: String) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text)])
 }
 
+/// Hit-list tools must not return an empty text body (harnesses render that as omitted).
+fn text_hit_body(hit_count: usize, lines: &str) -> String {
+    if hit_count == 0 {
+        "0 hits".to_owned()
+    } else {
+        lines.to_owned()
+    }
+}
+
 fn check_root(root: &str) -> Result<PathBuf, McpError> {
     let path = PathBuf::from(root);
     if !path.is_absolute() {
@@ -567,7 +576,7 @@ impl OneGrep {
                         return Ok(text_block(envelope));
                     }
                     let lines: Vec<String> = hits.iter().map(|h| render_ranked(&root, h)).collect();
-                    let body = lines.join("\n---\n");
+                    let body = text_hit_body(hits.len(), &lines.join("\n---\n"));
                     let text = if notes.is_empty() {
                         body
                     } else {
@@ -599,7 +608,7 @@ impl OneGrep {
                     return Ok(text_block(envelope));
                 }
                 let lines: Vec<String> = hits.iter().map(|h| render_live(&root, h)).collect();
-                let body = lines.join("\n---\n");
+                let body = text_hit_body(hits.len(), &lines.join("\n---\n"));
                 let text = format!("{}\n\n{body}", notes.join("\n"));
                 log_call(
                     "search",
@@ -686,7 +695,7 @@ impl OneGrep {
             return Ok(text_block(envelope));
         }
         let lines: Vec<String> = fused.iter().map(|h| render_fused(&root, h)).collect();
-        let body = lines.join("\n---\n");
+        let body = text_hit_body(fused.len(), &lines.join("\n---\n"));
         let text = if notes.is_empty() {
             body
         } else {
@@ -870,11 +879,14 @@ impl OneGrep {
             );
             return Ok(text_block(envelope));
         }
-        let body = hits
-            .iter()
-            .map(|h| render_fused(&root, h))
-            .collect::<Vec<_>>()
-            .join("\n---\n");
+        let body = text_hit_body(
+            hits.len(),
+            &hits
+                .iter()
+                .map(|h| render_fused(&root, h))
+                .collect::<Vec<_>>()
+                .join("\n---\n"),
+        );
         let text = format!("{}\n\n{body}", notes.join("\n"));
         log_call(
             "search_ranked",
@@ -1193,7 +1205,7 @@ impl OneGrep {
                     )
                 })
                 .collect();
-            let text = lines.join("\n");
+            let text = text_hit_body(hits.len(), &lines.join("\n"));
             log_call(
                 "rg",
                 &p.root,
@@ -1220,7 +1232,7 @@ impl OneGrep {
             .iter()
             .map(|h| format!("{}:{}:{}", rel(&root, &h.path), h.line, h.text))
             .collect();
-        let text = lines.join("\n");
+        let text = text_hit_body(hits.len(), &lines.join("\n"));
         log_call(
             "rg",
             &p.root,
@@ -1760,6 +1772,29 @@ mod tests {
         assert!(err.message.contains("cobol"));
         let err = rg_error(crate::Error::InvalidInput("x".into()));
         assert!(err.message.contains('x'));
+    }
+
+    #[tokio::test]
+    async fn rg_text_format_zero_hits_is_not_empty() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("a.rs"), "visible_token\n").expect("fixture");
+        let result = OneGrep::new()
+            .rg(Parameters(RgParams {
+                root: workspace.path().to_string_lossy().into_owned(),
+                pattern: "impossible_pattern_xyz_12345".into(),
+                regex: None,
+                structural: None,
+                case_insensitive: None,
+                lang: None,
+                globs: None,
+                format: None,
+                limit: None,
+            }))
+            .await
+            .expect("rg");
+        let text = serde_json::to_value(result).expect("response");
+        let body = text["content"][0]["text"].as_str().unwrap();
+        assert_eq!(body, "0 hits");
     }
 
     #[tokio::test]

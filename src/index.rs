@@ -309,8 +309,10 @@ pub fn stale_note(workspace: &Path) -> String {
 ///
 /// # Errors
 ///
-/// Returns [`Error::InvalidInput`] when the workspace has no index or the
-/// query fails to parse, and [`Error`] when search itself fails.
+/// Returns [`Error::InvalidInput`] when the workspace has no index, and
+/// [`Error`] when search itself fails. Prose queries are parsed leniently
+/// (unknown `field:` filters and minor syntax issues become match-nothing
+/// clauses rather than hard errors).
 pub fn search(workspace: &Path, query: &str, limit: usize) -> Result<Vec<RankedHit>, Error> {
     let dir = engine::index_dir(workspace);
     if !is_indexed(workspace) {
@@ -325,9 +327,7 @@ pub fn search(workspace: &Path, query: &str, limit: usize) -> Result<Vec<RankedH
     reader.reload()?;
     let searcher = reader.searcher();
     let parser = QueryParser::for_index(&index, vec![fields.text, fields.breadcrumb]);
-    let parsed = parser
-        .parse_query(query)
-        .map_err(|e| Error::InvalidInput(e.to_string()))?;
+    let (parsed, _errors) = parser.parse_query_lenient(query);
     let top = searcher.search(&parsed, &TopDocs::with_limit(limit))?;
     let mut hits = Vec::with_capacity(top.len());
     for (score, addr) in top {
@@ -419,6 +419,31 @@ mod tests {
                 .expect("search")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn bm25_lenient_query_syntax_does_not_error() {
+        let dir = workspace_with(&[(
+            "note.md",
+            "adopt foreign host pthread into NT thread allocate TEB\n",
+        )]);
+        sync(dir.path()).expect("sync");
+        search(
+            dir.path(),
+            "adopt foreign host pthread into NT thread: allocate TEB",
+            10,
+        )
+        .expect("prose with colon must not fail");
+        for q in [
+            "thread: foo",
+            "a:b:c",
+            "\"unbalanced",
+            "(unbalanced",
+            "-leading minus",
+        ] {
+            let hits = search(dir.path(), q, 10).expect("search must not fail");
+            assert!(hits.is_empty(), "unexpected hits for {q:?}: {hits:?}");
+        }
     }
 
     #[test]
